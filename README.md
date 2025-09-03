@@ -1,4 +1,6 @@
 # 🚀 FlightGPT： A vision-language model based agent for UAV navigation.
+[![arXiv][(https://img.shields.io/badge/arXiv-2506.12364-b31b1b.svg)](https://arxiv.org/abs/2506.12364)](https://arxiv.org/abs/2505.12835)
+****
 
 ## 🛠️ Environment Setup
 
