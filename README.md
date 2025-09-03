@@ -2,7 +2,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2506.12364-b31b1b.svg)](https://arxiv.org/abs/2506.12364)
 ****
 ## 📢 News
-- **2025-06-22**: Accepted by EMNLP 2025!
+- **2025-08-21**: Accepted by EMNLP 2025!
 
 
 ## 🛠️ Environment Setup
