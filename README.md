@@ -1,6 +1,9 @@
 # 🚀 FlightGPT： A vision-language model based agent for UAV navigation.
 [![arXiv](https://img.shields.io/badge/arXiv-2506.12364-b31b1b.svg)](https://arxiv.org/abs/2506.12364)
 ****
+## 📢 News
+- **2025-06-22**: Accepted by EMNLP 2025!
+
 
 ## 🛠️ Environment Setup
 
@@ -88,3 +91,16 @@ sh ./open-r1-multimodal/run_scripts/run_grpo_rec_lora.sh
 
 ---
 
+## 🖋️ Citation
+
+If you use FlightGPT in your research, please cite our project:
+
+```bibtex
+
+@article{cai2025flightgpt,
+  title={FlightGPT: Towards Generalizable and Interpretable UAV Vision-and-Language Navigation with Vision-Language Models},
+  author={Cai, Hengxing and Dong, Jinhan and Tan, Jingjun and Deng, Jingcheng and Li, Sihang and Gao, Zhifeng and Wang, Haidong and Su, Zicheng and Sumalee, Agachai and Zhong, Renxin},
+  journal={arXiv preprint arXiv:2505.12835},
+  year={2025}
+}
+```
