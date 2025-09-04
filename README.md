@@ -1,6 +1,8 @@
 # 🚀 FlightGPT： A vision-language model based agent for UAV navigation.
 [![arXiv](https://img.shields.io/badge/arXiv-2506.12364-b31b1b.svg)](https://arxiv.org/abs/2506.12364)
 [![model](https://img.shields.io/badge/model-Flightgpt-yellow.svg)](https://huggingface.co/ADJHD/Flightgpt)
+[![data](https://img.shields.io/badge/data-training-blue.svg)](https://huggingface.co/datasets/ADJHD/flightgpt_training_data)
+
 ****
 ## 📑 Introduction
 FlightGPT is a state-of-the-art UAV Vision-and-Language Navigation (VLN) framework designed for applications like disaster response, logistics delivery, and urban inspection. Built on powerful Vision-Language Models (VLMs), FlightGPT employs a two-stage training pipeline: supervised fine-tuning (SFT) with high-quality demonstrations to improve initialization and reasoning, followed by Group Relative Policy Optimization (GRPO) guided by a composite reward considering goal accuracy, reasoning quality, and format compliance to enhance generalization. With a Chain-of-Thought (CoT) reasoning mechanism for interpretable decision-making, FlightGPT achieves state-of-the-art performance on the city-scale CityNav dataset, surpassing the strongest baseline by 9.22% in unseen environments.
