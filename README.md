@@ -9,6 +9,7 @@ FlightGPT is a state-of-the-art UAV Vision-and-Language Navigation (VLN) framewo
 
 
 ## 📢 News
+- **2025-9-4**: Our training [data](https://huggingface.co/datasets/ADJHD/flightgpt_training_data) is now publicly available on Hugging Face!
 - **2025-9-3**: Our model [Flightgpt](https://huggingface.co/ADJHD/Flightgpt) is now publicly available on Hugging Face!
 - **2025-08-21**: Accepted by EMNLP 2025!
 
