@@ -1,23 +1,34 @@
-# Core libraries
-python==3.10
-torch>=2.5.0
-torchvision
-numpy
-scipy
-pandas
-matplotlib
-seaborn
-opencv-python
-Pillow
-tqdm
-requests
-pyyaml
+# === PyTorch & related (CUDA 12.4) ===
+torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+# === Transformers & RL ===
+transformers==4.50.0
+trl==0.17.0
+peft==0.15.0
+
+# === Open-R1 editable install ===
+-e open-r1-multimodal/
+
+# === Flash Attention ===
+flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+
+# === Logging & visualization ===
 wandb==0.18.3
-tensorboardX
-flash-attn
-transformers
-datasets
-einops
-peft
-trl
-accelerate
+tensorboardx
+
+# === Utilities ===
+qwen_vl_utils
+babel
+python-Levenshtein
+matplotlib
+pycocotools
+openai
+httpx[socks]
+opencv-python
+rasterio
+shapely
+supervision
+math_verify
+
