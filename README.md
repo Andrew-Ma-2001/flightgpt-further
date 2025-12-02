@@ -22,7 +22,7 @@ This project depends on multiple models and tool libraries. It is recommended to
 ### Install Conda Environment
 
 ```bash
-- conda create -n flightgpt python=3.10
+- conda create -n flightgpt python=3.11
 - conda activate flightgpt
 
 - pip install -r requirements.txt
