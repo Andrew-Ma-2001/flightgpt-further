@@ -1,0 +1,172 @@
+# ====================
+# Large Data & Datasets
+# ====================
+
+# Main data directories (42GB+)
+data/
+R1PhotoData/
+data_examples/
+
+# Training data archives
+data.tar.gz
+*.tar.gz
+*.tar
+*.z01
+*.z02
+*.z03
+
+# ====================
+# Model Weights
+# ====================
+
+# Model weight directories (31GB+)
+model_weight/
+
+# Safetensors model files
+*.safetensors
+
+# PyTorch model files
+*.pt
+*.pth
+*.bin
+
+# TensorFlow/Keras model files
+*.h5
+*.hdf5
+*.keras
+
+# ONNX models
+*.onnx
+
+# Checkpoint files
+*.ckpt
+*.ckpt.*
+
+# ====================
+# Experiment Outputs
+# ====================
+
+# Experiment directory (34GB) - checkpoints, logs
+experiment/
+
+# ====================
+# External Libraries/Repos
+# ====================
+
+# LLaMA-Factory (16GB) - can be cloned separately
+LLaMA-Factory/
+
+# vLLM library (4GB) - can be installed via pip
+vllm/
+
+# ====================
+# Wheel & Build Files
+# ====================
+
+# Pre-built wheels
+*.whl
+
+# Build directories
+build/
+dist/
+*.egg-info/
+
+# ====================
+# Logging & Tracking
+# ====================
+
+# Weights & Biases
+wandb/
+
+# SwanLab logs
+swanlog/
+
+# ====================
+# Python
+# ====================
+
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# ====================
+# IDE & Editor
+# ====================
+
+# VS Code / Cursor
+.vscode/
+.cursor/
+
+# PyCharm
+.idea/
+
+# Vim
+*.swp
+*.swo
+*~
+
+# ====================
+# OS Generated
+# ====================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*.desktop
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# ====================
+# Large Binary Files
+# ====================
+
+# Image datasets (if stored directly)
+*.tif
+*.tiff
+
+# Compressed archives
+*.zip
+
+# NumPy arrays
+*.npz
+*.npy
+
+# ====================
+# Miscellaneous
+# ====================
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+
+# pytest cache
+.pytest_cache/
+
+# mypy cache
+.mypy_cache/
