@@ -38,6 +38,14 @@ from transformers import (
     TrainerCallback,
     is_wandb_available,
 )
+
+# Check if swanlab is available
+def is_swanlab_available():
+    try:
+        import swanlab
+        return True
+    except ImportError:
+        return False
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.utils import is_peft_available
 
@@ -59,6 +67,9 @@ if is_peft_available():
 
 if is_wandb_available():
     import wandb
+
+if is_swanlab_available():
+    import swanlab
 
 from open_r1.vlm_modules.vlm_module import VLMBaseModule
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
@@ -255,6 +266,10 @@ class VLMGRPOTrainer(Trainer):
             False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
         )
         model_cls = self.vlm_module.get_model_class(model_id, model_init_kwargs)
+        # Add local_files_only=True if model_id is a local path
+        import os
+        if os.path.exists(model_id) and os.path.isdir(model_id):
+            model_init_kwargs["local_files_only"] = True
         model = model_cls.from_pretrained(model_id, **model_init_kwargs)
 
         # LoRA
@@ -808,13 +823,28 @@ class VLMGRPOTrainer(Trainer):
             """
         )
 
+        # Get wandb URL if available
+        wandb_url = None
+        if is_wandb_available() and wandb.run is not None:
+            wandb_url = wandb.run.get_url()
+        
+        # Get swanlab URL if available
+        swanlab_url = None
+        if is_swanlab_available():
+            try:
+                import swanlab
+                if swanlab.get_run() is not None:
+                    swanlab_url = swanlab.get_run().url
+            except:
+                pass
+        
         model_card = generate_model_card(
             base_model=base_model,
             model_name=model_name,
             hub_model_id=self.hub_model_id,
             dataset_name=dataset_name,
             tags=tags,
-            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            wandb_url=wandb_url or swanlab_url,  # Use swanlab URL if wandb is not available
             comet_url=get_comet_experiment_url(),
             trainer_name="GRPO",
             trainer_citation=citation,

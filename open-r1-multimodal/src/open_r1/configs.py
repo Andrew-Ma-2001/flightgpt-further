@@ -48,6 +48,14 @@ class GRPOConfig(trl.GRPOConfig):
         default=None,
         metadata={"help": ("The project to store runs under.")},
     )
+    swanlab_project: Optional[str] = field(
+        default=None,
+        metadata={"help": ("The swanlab project to store runs under.")},
+    )
+    swanlab_experiment: Optional[str] = field(
+        default=None,
+        metadata={"help": ("The swanlab experiment name.")},
+    )
 
 
 @dataclass
@@ -79,4 +87,12 @@ class SFTConfig(trl.SFTConfig):
     wandb_project: Optional[str] = field(
         default=None,
         metadata={"help": ("The project to store runs under.")},
+    )
+    swanlab_project: Optional[str] = field(
+        default=None,
+        metadata={"help": ("The swanlab project to store runs under.")},
+    )
+    swanlab_experiment: Optional[str] = field(
+        default=None,
+        metadata={"help": ("The swanlab experiment name.")},
     )

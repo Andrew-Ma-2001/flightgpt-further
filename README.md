@@ -62,16 +62,30 @@ This project depends on multiple models and tool libraries. It is recommended to
 
 1. Start the vLLM service
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve path/to/your/model \
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve /home/yjy/flightgpt/FlightGPT/model_weight/Flightgpt_SFT \
   --dtype auto \
   --trust-remote-code \
   --served-model-name qwen_2_5_vl_7b \
   --host 0.0.0.0 \
   -tp 4 \
   --uvicorn-log-level debug \
-  --port your_port \
+  --port 8989 \
   --limit-mm-per-prompt image=2,video=0 \
   --max-model-len=32000
+
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/Qwen2.5-VL-7B-Instruct \
+  --dtype auto \
+  --trust-remote-code \
+  --served-model-name qwen_2_5_vl_7b \
+  --host 0.0.0.0 \
+  -tp 4 \
+  --port 8989 \
+  --enable-lora \
+  --lora-modules grpo_lora=./experiment/FlightGPT/checkpoint-2379 \
+  --limit-mm-per-prompt image=2,video=0 \
+  --max-model-len=32000 \
+  --max-lora-rank 64
 ```
 
 2. Start the inference script

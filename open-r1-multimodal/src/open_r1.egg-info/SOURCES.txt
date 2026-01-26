@@ -6,9 +6,7 @@ src/open_r1/configs.py
 src/open_r1/evaluate.py
 src/open_r1/generate.py
 src/open_r1/grpo.py
-src/open_r1/grpo_jsonl.py
 src/open_r1/grpo_jsonl_citynav.py
-src/open_r1/grpo_rec.py
 src/open_r1/sft.py
 src/open_r1.egg-info/PKG-INFO
 src/open_r1.egg-info/SOURCES.txt

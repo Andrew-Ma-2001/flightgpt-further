@@ -65,6 +65,7 @@ _deps = [
     "trl==0.17.0",
     "vllm==0.6.6.post1",
     "wandb>=0.19.1",
+    "swanlab>=0.3.0",
     "pillow",
 ]
 

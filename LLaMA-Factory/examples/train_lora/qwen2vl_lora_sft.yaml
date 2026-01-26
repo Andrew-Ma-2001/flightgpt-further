@@ -1,5 +1,5 @@
 ### model
-model_name_or_path: ./models/Qwen2.5-VL-7B-Instruct
+model_name_or_path: /home/yjy/flightgpt/FlightGPT/LLaMA-Factory/qwen2.5-vl
 image_max_pixels: 16032016 
 video_max_pixels: 16384
 trust_remote_code: true

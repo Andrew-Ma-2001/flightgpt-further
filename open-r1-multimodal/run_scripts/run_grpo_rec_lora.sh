@@ -25,7 +25,7 @@ torchrun --nproc_per_node="4" \
     --bf16 \
     --torch_dtype bfloat16 \
     --data_seed 42 \
-    --report_to wandb \
+    --report_to swanlab \
     --gradient_checkpointing true \
     --attn_implementation flash_attention_2 \
     --num_train_epochs 1 \

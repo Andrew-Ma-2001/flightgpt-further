@@ -1,3 +1,30 @@
+"""
+Evaluate GRPO LoRA model using vLLM's built-in LoRA support.
+
+This script uses vLLM's native LoRA adapter loading capability, which allows
+testing LoRA models without merging them into the base model.
+
+This is an alternative to merging - faster to test different checkpoints.
+
+Usage:
+1. Start vLLM with LoRA support:
+   CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/Qwen2.5-VL-7B-Instruct \
+     --dtype auto \
+     --trust-remote-code \
+     --served-model-name qwen_2_5_vl_7b \
+     --host 0.0.0.0 \
+     -tp 4 \
+     --port 8989 \
+     --enable-lora \
+     --lora-modules grpo_lora=./experiment/FlightGPT/checkpoint-2379 \
+     --limit-mm-per-prompt image=2,video=0 \
+     --max-model-len=32000 \
+     --max-lora-rank 64
+
+2. Run evaluation:
+   python eval_grpo_lora.py
+"""
+
 import os
 import sys
 import re
@@ -23,15 +50,15 @@ os.environ["http_proxy"] = ""
 os.environ["https_proxy"] = ""
 cropclient.load_image_cache()
 
-# model config
+# Model config - using LoRA adapter name
 API_CONFIG = {
     "api_key": "EMPTY",
-    "api_base": "http://0.0.0.0:8989/v1",   #use your port
+    "api_base": "http://0.0.0.0:8989/v1",
     "api_version": "2024-05-01-preview",
-    "model": "qwen_2_5_vl_7b",
+    "model": "grpo_lora",  # Use the LoRA adapter name specified in --lora-modules
     "system_prompt": "You are an intelligent autonomous aerial vehicle (UAV) equipped for real-world navigation and visual target localization."
 }
-SAVE_PATH = "./experiment"
+SAVE_PATH = "./experiment/grpo_eval"
 
 
 def create_dir(file_path):
@@ -248,10 +275,10 @@ def run_nav_gym(citynavData, split, step, action_num):
 
 def main():
     print("\n" + "🚀" * 30)
-    print("FlightGPT Evaluation Starting")
+    print("FlightGPT GRPO LoRA Evaluation")
     print("🚀" * 30)
     print(f"vLLM Server: {API_CONFIG['api_base']}")
-    print(f"Model: {API_CONFIG['model']}")
+    print(f"Model (LoRA adapter): {API_CONFIG['model']}")
     print(f"Save Path: {SAVE_PATH}\n")
     
     results = {}
@@ -262,8 +289,8 @@ def main():
     
     overall_start = time.time()
     
-    for split in ["easy"]:
-    # for split in ["easy", "medium", "hard"]:
+    # for split in ["hard"]:
+    for split in ["easy", "medium", "hard"]:
         print("\n" + "=" * 60)
         print(f"Processing split: {split.upper()}")
         print("=" * 60)

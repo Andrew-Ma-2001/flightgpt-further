@@ -1,7 +1,7 @@
 # === PyTorch & related (CUDA 12.4) ===
-torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
-torchvision==0.21.0+cu124 --index-url https://download.pytorch.org/whl/cu124
-torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124 --index-url https://mirrors.nju.edu.cn/pytorch/whl/cu124
+torchvision==0.21.0+cu124 --index-url https://mirrors.nju.edu.cn/pytorch/whl/cu124
+torchaudio==2.6.0+cu124 --index-url https://mirrors.nju.edu.cn/pytorch/whl/cu124
 
 # === Transformers & RL ===
 transformers==4.50.0
@@ -12,10 +12,11 @@ peft==0.15.0
 -e open-r1-multimodal/
 
 # === Flash Attention ===
-flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+#flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
 
 # === Logging & visualization ===
 wandb==0.18.3
+swanlab
 tensorboardx
 
 # === Utilities ===

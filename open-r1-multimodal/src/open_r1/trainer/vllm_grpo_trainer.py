@@ -68,9 +68,20 @@ if is_peft_available():
 if is_vllm_available():
     from vllm import LLM, SamplingParams
 
+# Check if swanlab is available
+def is_swanlab_available():
+    try:
+        import swanlab
+        return True
+    except ImportError:
+        return False
 
 if is_wandb_available():
     import wandb
+
+if is_swanlab_available():
+    import swanlab
+
 import torch.nn as nn
 from torch.utils.data import Sampler
 

@@ -39,7 +39,7 @@
     }
   },
   "citynav": {
-    "file_name": "sftdatabbox.json",
+    "file_name": "sftdatabbox_rlqwen_final.json",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages",
