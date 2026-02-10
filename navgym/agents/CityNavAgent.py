@@ -198,7 +198,8 @@ class GPTAgent:
 
         return f"data:{mime_type};base64,{base64_encoded_data}"
 
-    def _gpt4o_imagefile(self, map_file, view_file, system_prompt, prompt):
+    def _gpt4o_imagefile(self, map_file, view_file, system_prompt, prompt,
+                         max_retries=3, timeout=60.0):
         """
         Gpt-4o model with timeout and retry logic
         """
@@ -206,7 +207,7 @@ class GPTAgent:
         client = OpenAI(
             base_url=self.gpt_info.api_base,
             api_key=self.gpt_info.api_key,
-            timeout=300.0  # 5 minute timeout
+            timeout=timeout,
         )
 
         # Time the base64 encoding
@@ -217,32 +218,45 @@ class GPTAgent:
         if encode_time > 1.0:
             print(f"  [Base64 Encode] took {encode_time:.2f}s")
 
-        # Time the API call
-        api_start = time.time()
-        response = client.chat.completions.create(
-            model=self.gpt_info.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": map_data_url},
-                        }
-                    ],
-                },
-            ],
-            max_tokens=2000,
-            temperature=0.0,
-            timeout=300  # Request-level timeout
-        )
-        api_time = time.time() - api_start
-        
-        print(f"  [API Call] took {api_time:.2f}s")
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": map_data_url},
+                    }
+                ],
+            },
+        ]
 
-        return response
+        # Retry loop
+        for attempt in range(1, max_retries + 1):
+            try:
+                api_start = time.time()
+                response = client.chat.completions.create(
+                    model=self.gpt_info.model,
+                    messages=messages,
+                    max_tokens=2000,
+                    temperature=0.0,
+                    timeout=timeout,
+                )
+                api_time = time.time() - api_start
+                print(f"  [API Call] took {api_time:.2f}s (attempt {attempt}/{max_retries})")
+                return response
+
+            except Exception as e:
+                api_time = time.time() - api_start
+                print(f"  [API Call] attempt {attempt}/{max_retries} failed after {api_time:.2f}s: {type(e).__name__}: {e}")
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt  # exponential backoff: 2s, 4s, 8s
+                    print(f"  [Retry] waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"  [API Call] all {max_retries} attempts failed, raising exception")
+                    raise
