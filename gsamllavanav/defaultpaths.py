@@ -8,10 +8,11 @@ GOAL_PREDICTOR_CHECKPOINT_DIR = PROJECT_ROOT/"checkpoints/goal_predictor"
 BASELINE_WITH_MAP_CHECKPOINT_DIR = PROJECT_ROOT/"checkpoints/baseline_with_map"
 
 CITYREFER_DATA_DIR = PROJECT_ROOT/"data/cityrefer"
+# CITYREFER_DATA_DIR = Path("/home/yjy/flightgpt/FlightGPT/refine_citynav/cityrefer")
 OBJECTS_PATH = CITYREFER_DATA_DIR/"objects.json"
 PROCESSED_DECRIPTIONS_PATH = CITYREFER_DATA_DIR/"processed_descriptions.json"
 MTURK_TRAJECTORY_DIR = PROJECT_ROOT/"data/citynav"
-
+# MTURK_TRAJECTORY_DIR = Path("/home/yjy/flightgpt/FlightGPT/refine_citynav/processed_citynav")
 ORTHO_IMAGE_DIR = PROJECT_ROOT/"data/rgbd-new"
 SUBBLOCKS_DIR = PROJECT_ROOT/"data/subblocks"
 

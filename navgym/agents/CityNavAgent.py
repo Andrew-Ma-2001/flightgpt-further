@@ -53,7 +53,7 @@ class GPTAgent:
     def __init__(
             self, api_key, api_version, api_base, model, 
             system_prompt, target_description, drone_see_shape,
-            scale, top_left
+            scale, top_left, compress_images=True
         ):
         self.gpt_info = GPTInfo(
             api_key = api_key,
@@ -66,15 +66,20 @@ class GPTAgent:
         self.drone_see_shape = drone_see_shape
         self.scale = scale
         self.top_left = top_left
+        self.compress_images = compress_images
         self.image_scale_factor = 1.0  # Track image resize scale
 
 
     def act(self, cur_whole_map, cur_rgb_drone, cur_position):
-        # Check and resize images if needed
-        start_time = time.time()
-        cur_whole_map, map_scale = self._check_and_resize_image(cur_whole_map, "map")
-        cur_rgb_drone, drone_scale = self._check_and_resize_image(cur_rgb_drone, "drone")
-        resize_time = time.time() - start_time
+        # Optionally resize images to reduce VLLM throughput pressure
+        if self.compress_images:
+            start_time = time.time()
+            cur_whole_map, map_scale = self._check_and_resize_image(cur_whole_map, "map")
+            cur_rgb_drone, drone_scale = self._check_and_resize_image(cur_rgb_drone, "drone")
+            resize_time = time.time() - start_time
+        else:
+            map_scale = (1.0, 1.0)
+            resize_time = 0.0
         
         # Store the map scale factor for coordinate transformation
         self.image_scale_factor = map_scale
@@ -199,11 +204,10 @@ class GPTAgent:
         return f"data:{mime_type};base64,{base64_encoded_data}"
 
     def _gpt4o_imagefile(self, map_file, view_file, system_prompt, prompt,
-                         max_retries=3, timeout=60.0):
+                         timeout=120.0):
         """
-        Gpt-4o model with timeout and retry logic
+        Gpt-4o model with timeout, fail fast on error
         """
-        # Create client with timeout
         client = OpenAI(
             base_url=self.gpt_info.api_base,
             api_key=self.gpt_info.api_key,
@@ -218,45 +222,29 @@ class GPTAgent:
         if encode_time > 1.0:
             print(f"  [Base64 Encode] took {encode_time:.2f}s")
 
-        messages = [
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": map_data_url},
-                    }
-                ],
-            },
-        ]
-
-        # Retry loop
-        for attempt in range(1, max_retries + 1):
-            try:
-                api_start = time.time()
-                response = client.chat.completions.create(
-                    model=self.gpt_info.model,
-                    messages=messages,
-                    max_tokens=2000,
-                    temperature=0.0,
-                    timeout=timeout,
-                )
-                api_time = time.time() - api_start
-                print(f"  [API Call] took {api_time:.2f}s (attempt {attempt}/{max_retries})")
-                return response
-
-            except Exception as e:
-                api_time = time.time() - api_start
-                print(f"  [API Call] attempt {attempt}/{max_retries} failed after {api_time:.2f}s: {type(e).__name__}: {e}")
-                if attempt < max_retries:
-                    wait_time = 2 ** attempt  # exponential backoff: 2s, 4s, 8s
-                    print(f"  [Retry] waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                else:
-                    print(f"  [API Call] all {max_retries} attempts failed, raising exception")
-                    raise
+        api_start = time.time()
+        response = client.chat.completions.create(
+            model=self.gpt_info.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": map_data_url},
+                        }
+                    ],
+                },
+            ],
+            max_tokens=2000,
+            temperature=0.0,
+            timeout=timeout,
+        )
+        api_time = time.time() - api_start
+        print(f"  [API Call] took {api_time:.2f}s")
+        return response
