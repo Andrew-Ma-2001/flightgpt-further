@@ -336,7 +336,7 @@ def overlay_map_points(nav: NavGym, show_gt: bool = True) -> Image.Image:
         # Success region follows eval_planning_metrics threshold: dist <= 20m.
         rx = max(1, int(20 / nav.px_real_size[0]))
         ry = max(1, int(20 / nav.px_real_size[1]))
-        draw.ellipse((tgt_x - rx, tgt_y - ry, tgt_x + rx, tgt_y + ry), outline=(255, 165, 0), width=3)
+        draw.ellipse((tgt_x - rx, tgt_y - ry, tgt_x + rx, tgt_y + ry), outline=(255, 165, 0), width=16)
 
     # Model prediction overlays
     pred = st.session_state.model_pred_px
