@@ -9,7 +9,7 @@ cd /home/yjy/flightgpt/FlightGPT && source /home/yjy/miniconda3/etc/profile.d/co
 #### 启动vLLM server，对应 grpo 训练模型，qwen2.5-vl-7b, flightgpt sft 模型
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/FlightGPT_GRPO_Merged   --dtype auto   --trust-remote-code   --served-model-name qwen_2_5_vl_7b   --host 0.0.0.0   -tp 4   --port 8989   --limit-mm-per-prompt image=2,video=0   --max-model-len=32000
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/FlightGPT_GRPO_Merged   --dtype auto   --trust-remote-code   --served-model-name qwen_2_5_vl_grpo   --host 0.0.0.0   -tp 4   --port 8989   --limit-mm-per-prompt image=2,video=0   --max-model-len=32000
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/Qwen2.5-VL-7B-Instruct   --dtype auto   --trust-remote-code   --served-model-name qwen_2_5_vl_7b   --host 0.0.0.0   -tp 4   --port 8989   --limit-mm-per-prompt image=2,video=0   --max-model-len=32000
 
