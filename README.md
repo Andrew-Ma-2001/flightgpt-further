@@ -111,6 +111,7 @@ llamafactory-cli export ./LLaMA-Factory/examples/merge_lora/qwen2vl_lora_sft.yam
 2、GRPO
 ```bash
 sh ./open-r1-multimodal/run_scripts/run_grpo_rec_lora.sh
+sh ./open-r1-multimodal/run_scripts/run_grpo_rec_lora_newdataset.sh
 ```
 
 ---

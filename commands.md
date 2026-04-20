@@ -4,6 +4,11 @@ cd /home/yjy/flightgpt/FlightGPT && source /home/yjy/miniconda3/etc/profile.d/co
     --base_model ./model_weight/Qwen2.5-VL-7B-Instruct \
     --lora_adapter ./experiment/FlightGPT/checkpoint-2379 \
     --output_dir ./model_weight/FlightGPT_GRPO_Merged
+
+cd /home/yjy/flightgpt/FlightGPT && source /home/yjy/miniconda3/etc/profile.d/conda.sh && conda activate flightgpt && python merge_grpo_lora.py \
+    --base_model ./model_weight/Qwen2.5-VL-7B-Instruct \
+    --lora_adapter ./experiment/FlightGPT_GRPO_GUIG2reward_Lora/checkpoint-2379 \
+    --output_dir ./model_weight/FlightGPT_GRPO_GUIG2
 ```
 
 #### 启动vLLM server，对应 grpo 训练模型，qwen2.5-vl-7b, flightgpt sft 模型
@@ -47,3 +52,18 @@ upload /home/yjy/flightgpt/FlightGPT/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-
 1. refineCityNav 对应 refine_citynav
 2. r1-flightgpt 对应 experiment/FlightGPT/checkpoint-2379
 3. refineCityNav 保存 flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64 依赖包
+
+软连接
+```bash
+# 1) 先创建 HETT/data 目录
+mkdir -p HETT/data
+
+# 2) 把 HETT 里需要的目录，链接到你现有 data 目录
+ln -sfn "$(pwd)/refine_citynav/cityrefer" HETT/data/cityrefer
+ln -sfn "$(pwd)/refine_citynav/processed_citynav" HETT/data/processed_citynav
+ln -sfn "$(pwd)/data/rgbd-new" HETT/data/rgbd
+ln -sfn "$(pwd)/data/subblocks" HETT/data/subblocks
+
+# 3) 检查是否链接成功
+ls -l HETT/data
+```

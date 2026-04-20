@@ -2,7 +2,7 @@ import os
 import sys
 import pickle
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,13 @@ from PIL import Image, ImageDraw
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+# HETT checkpoints may pickle classes from `multiagent.*`,
+# whose package root is `<project>/HETT`.
+HETT_ROOT = PROJECT_ROOT / "HETT"
+if str(HETT_ROOT) not in sys.path:
+    # Keep project root packages first (e.g. gsamllavanav), and only add HETT
+    # as a fallback for unpickling `multiagent.*` classes from HETT checkpoints.
+    sys.path.append(str(HETT_ROOT))
 
 from gsamllavanav.defaultpaths import MTURK_TRAJECTORY_DIR
 from navgym.models.CityNavData import CityNavData
@@ -23,6 +30,143 @@ from navgym.models.NavGym import NavGym
 SPLITS = ["easy", "medium", "hard"]
 NEW_DATA_DIR = "/home/yjy/flightgpt/FlightGPT/refine_citynav/processed_citynav"
 SR_THRESHOLDS = [5, 10, 15, 20, 25, 30]
+SR_COMPARE_THRESHOLDS = [5, 10, 15, 20, 25, 30, 35, 40]
+
+# Initial heading bins: [-180, 180], 15° wide (24 bins). -180° and +180° share one bin via wrapping.
+HEADING_BIN_WIDTH_DEG = 15.0
+HEADING_BIN_EDGES = np.arange(-180, 181, HEADING_BIN_WIDTH_DEG)
+HEADING_BIN_CENTERS = (HEADING_BIN_EDGES[:-1] + HEADING_BIN_EDGES[1:]) / 2.0
+
+
+def _wrap_heading_deg(deg: float) -> float:
+    return float(((deg + 180.0) % 360.0) - 180.0)
+
+
+def _initial_heading_deg_from_episode(ep) -> float:
+    rad = float(ep.start_pose.yaw)
+    deg = float(np.rad2deg(rad))
+    return _wrap_heading_deg(deg)
+
+
+def _heading_bin_index(deg: float) -> int:
+    d = _wrap_heading_deg(float(deg))
+    if d >= 180.0 - 1e-9:
+        d = -180.0
+    idx = int(np.floor((d + 180.0) / HEADING_BIN_WIDTH_DEG))
+    return int(min(max(idx, 0), len(HEADING_BIN_CENTERS) - 1))
+
+
+def _heading_bin_stats(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+    n_bins = len(HEADING_BIN_CENTERS)
+    counts = np.zeros(n_bins, dtype=int)
+    ne_sum = np.zeros(n_bins, dtype=float)
+    if df.empty or "initial_heading_deg" not in df.columns:
+        return counts, np.full(n_bins, np.nan)
+    for _, row in df.iterrows():
+        bi = _heading_bin_index(row["initial_heading_deg"])
+        counts[bi] += 1
+        ne_sum[bi] += float(row["ne"])
+    mean_ne = np.full(n_bins, np.nan, dtype=float)
+    for i in range(n_bins):
+        if counts[i] > 0:
+            mean_ne[i] = ne_sum[i] / counts[i]
+    return counts, mean_ne
+
+
+def _draw_initial_heading_polar(df: pd.DataFrame, title: str):
+    """Polar bar + closed polyline of mean NE per heading bin (15°)."""
+    fig, ax = plt.subplots(figsize=(6.5, 6.5), subplot_kw=dict(projection="polar"))
+    if df.empty or "initial_heading_deg" not in df.columns:
+        ax.set_title(title, pad=12)
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center")
+        fig.tight_layout()
+        return fig
+
+    counts, mean_ne = _heading_bin_stats(df)
+    theta = np.deg2rad(HEADING_BIN_CENTERS)
+    width = np.deg2rad(HEADING_BIN_WIDTH_DEG * 0.92)
+
+    r_max = 1.0
+    valid_any = np.any(counts > 0) and np.any(np.isfinite(mean_ne))
+    if valid_any:
+        r_max = float(np.nanmax(mean_ne[counts > 0])) * 1.12
+        if r_max <= 0:
+            r_max = 1.0
+
+    idx_valid = np.where(counts > 0)[0]
+    min_idxs: List[int] = []
+    max_idxs: List[int] = []
+    if idx_valid.size > 0:
+        vals = np.array([mean_ne[i] for i in idx_valid], dtype=float)
+        min_val = float(np.min(vals))
+        max_val = float(np.max(vals))
+        min_idxs = [int(i) for i in idx_valid if np.isclose(mean_ne[i], min_val, rtol=0.0, atol=1e-6)]
+        max_idxs = [int(i) for i in idx_valid if np.isclose(mean_ne[i], max_val, rtol=0.0, atol=1e-6)]
+        if np.isclose(min_val, max_val):
+            max_idxs = []
+
+    def _bar_color(i: int) -> str:
+        in_min = i in min_idxs
+        in_max = i in max_idxs
+        if in_min and in_max:
+            return "#9467bd"
+        if in_min:
+            return "#2ca02c"
+        if in_max:
+            return "#d62728"
+        return "#4c78a8"
+
+    for i in range(len(HEADING_BIN_CENTERS)):
+        if counts[i] == 0:
+            continue
+        ax.bar(
+            theta[i],
+            mean_ne[i],
+            width=width,
+            bottom=0.0,
+            alpha=0.55,
+            color=_bar_color(i),
+            edgecolor="white",
+            linewidth=0.6,
+        )
+
+    order = np.argsort(theta)
+    th_s = theta[order]
+    r_s = mean_ne[order].astype(float)
+    mask = counts[order] > 0
+    th_line = th_s[mask]
+    r_line = r_s[mask]
+    if th_line.size >= 2:
+        th_closed = np.append(th_line, th_line[0])
+        r_closed = np.append(r_line, r_line[0])
+        ax.plot(
+            th_closed,
+            r_closed,
+            color="#d62728",
+            linewidth=2.2,
+            marker="o",
+            markersize=4,
+            zorder=5,
+        )
+    elif th_line.size == 1:
+        ax.plot(th_line, r_line, color="#d62728", linewidth=2.2, marker="o", markersize=5, zorder=5)
+
+    ax.set_ylim(0.0, r_max)
+    ax.set_title(title, pad=16)
+    ax.grid(alpha=0.35)
+    n = int(len(df))
+    k = int(np.sum(counts > 0))
+    fig.text(
+        0.5,
+        0.02,
+        f"n={n}  |  bins with data={k}  |  bin={HEADING_BIN_WIDTH_DEG:.0f}°  |  range=[-180,180]°"
+        f"  |  green=min mean NE  |  red=max mean NE",
+        ha="center",
+        fontsize=9,
+        color="#333333",
+    )
+    fig.tight_layout()
+    return fig
 
 
 @st.cache_resource(show_spinner=False)
@@ -87,12 +231,16 @@ def _normalize_checkpoint_data(raw):
     return {}
 
 
+def _load_checkpoint_pickle(checkpoint_path: str):
+    with open(checkpoint_path, "rb") as f:
+        return pickle.load(f)
+
+
 def _build_split_records(split: str, checkpoint_path: str) -> Tuple[pd.DataFrame, Dict]:
     if not checkpoint_path or not os.path.exists(checkpoint_path):
         return pd.DataFrame(), {"count": 0, "ne": np.nan, "sr": np.nan, "osr": np.nan, "spl": np.nan}
 
-    with open(checkpoint_path, "rb") as f:
-        raw = pickle.load(f)
+    raw = _load_checkpoint_pickle(checkpoint_path)
     traj_by_id = _normalize_checkpoint_data(raw)
 
     citynav = load_citynav_data(split)
@@ -131,6 +279,7 @@ def _build_split_records(split: str, checkpoint_path: str) -> Tuple[pd.DataFrame
                 "path_len": path_len,
                 "optimal_len": optimal_len,
                 "steps": max(0, len(traj) - 1),
+                "initial_heading_deg": _initial_heading_deg_from_episode(ep),
             }
         )
 
@@ -146,6 +295,113 @@ def _build_split_records(split: str, checkpoint_path: str) -> Tuple[pd.DataFrame
         "spl": float(df["spl"].mean()),
     }
     return df, summary
+
+
+def _summary_from_df(df: pd.DataFrame) -> Dict:
+    if df.empty:
+        return {"count": 0, "ne": np.nan, "sr": np.nan, "osr": np.nan, "spl": np.nan}
+    return {
+        "count": int(len(df)),
+        "ne": float(df["ne"].mean()),
+        "sr": float(df["sr"].mean()),
+        "osr": float(df["osr"].mean()),
+        "spl": float(df["spl"].mean()),
+    }
+
+
+def _build_hett_records(checkpoint_path: str) -> Tuple[pd.DataFrame, Dict]:
+    """Build HETT records against the union of easy/medium/hard episodes."""
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        return pd.DataFrame(), {"count": 0, "ne": np.nan, "sr": np.nan, "osr": np.nan, "spl": np.nan}
+
+    raw = _load_checkpoint_pickle(checkpoint_path)
+    traj_by_id = _normalize_checkpoint_data(raw)
+    if not traj_by_id:
+        return pd.DataFrame(), {"count": 0, "ne": np.nan, "sr": np.nan, "osr": np.nan, "spl": np.nan}
+
+    records: List[Dict] = []
+    seen_ids = set()
+    global_index = 0
+
+    for split in SPLITS:
+        citynav = load_citynav_data(split)
+        for ep in citynav.episodes:
+            global_index += 1
+            if ep.id in seen_ids:
+                continue
+            if ep.id not in traj_by_id:
+                continue
+            traj = traj_by_id[ep.id]
+            if not traj:
+                continue
+
+            seen_ids.add(ep.id)
+            final_pose = traj[-1]
+            final_dist = float(final_pose.xy.dist_to(ep.target_position.xy))
+            oracle_dist = float(min(p.xy.dist_to(ep.target_position.xy) for p in traj))
+            sr = float(final_dist <= 20.0)
+            osr = float(oracle_dist <= 20.0)
+            path_len = _path_length(traj)
+            optimal_len = float(ep.target_position.xy.dist_to(ep.start_pose.xy))
+            denom = max(path_len, optimal_len)
+            spl = float(sr * optimal_len / denom) if denom > 0 else 0.0
+
+            records.append(
+                {
+                    "split": "hett",
+                    "index": global_index,
+                    "episode_id": str(ep.id),
+                    "ne": final_dist,
+                    "sr": sr,
+                    "osr": osr,
+                    "spl": spl,
+                    "oracle_ne": oracle_dist,
+                    "dx_to_target": float(final_pose.x - ep.target_position.x),
+                    "dy_to_target": float(final_pose.y - ep.target_position.y),
+                    "path_len": path_len,
+                    "optimal_len": optimal_len,
+                    "steps": max(0, len(traj) - 1),
+                    "initial_heading_deg": _initial_heading_deg_from_episode(ep),
+                }
+            )
+
+    if not records:
+        return pd.DataFrame(), {"count": 0, "ne": np.nan, "sr": np.nan, "osr": np.nan, "spl": np.nan}
+
+    df = pd.DataFrame(records)
+    return df, _summary_from_df(df)
+
+
+def _compute_sr_at_thresholds(df: pd.DataFrame, thresholds: List[float]) -> np.ndarray:
+    if df.empty:
+        return np.array([np.nan] * len(thresholds), dtype=float)
+    ne_values = df["ne"].to_numpy()
+    return np.array([float((ne_values <= t).mean()) for t in thresholds], dtype=float)
+
+
+def _draw_sr_threshold_comparison(
+    thresholds: List[float], emh_sr: np.ndarray, hett_sr: np.ndarray
+):
+    fig, ax = plt.subplots(figsize=(7.2, 4.0))
+    if np.all(np.isnan(emh_sr)) and np.all(np.isnan(hett_sr)):
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.set_title("SR threshold comparison")
+        return fig
+
+    x = np.array(thresholds, dtype=float)
+    if not np.all(np.isnan(emh_sr)):
+        ax.plot(x, emh_sr, marker="o", linewidth=2, color="#4c78a8", label="total (easy+medium+hard)")
+    if not np.all(np.isnan(hett_sr)):
+        ax.plot(x, hett_sr, marker="s", linewidth=2, color="#e45756", label="hett")
+
+    ax.set_xlabel("SR threshold (m)")
+    ax.set_ylabel("SR")
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(alpha=0.25)
+    ax.set_title("SR threshold comparison")
+    ax.legend(loc="lower right")
+    fig.tight_layout()
+    return fig
 
 
 def _draw_ne_distribution(df: pd.DataFrame, split: str):
@@ -167,7 +423,26 @@ def _draw_ne_distribution(df: pd.DataFrame, split: str):
     return fig
 
 
-def _draw_sr_offset_scatter(df: pd.DataFrame, split: str):
+def _shared_sr_offset_limit(*dfs: pd.DataFrame) -> float:
+    max_abs = max(SR_THRESHOLDS) + 3.0
+    has_data = False
+    for df in dfs:
+        if df is None or df.empty:
+            continue
+        has_data = True
+        dx = df["dx_to_target"].to_numpy()
+        dy = df["dy_to_target"].to_numpy()
+        max_abs = max(
+            max_abs,
+            float(np.abs(dx).max(initial=0.0)),
+            float(np.abs(dy).max(initial=0.0)),
+        )
+    if not has_data:
+        max_abs = max(SR_THRESHOLDS) + 3.0
+    return float(max_abs + 2.0)
+
+
+def _draw_sr_offset_scatter(df: pd.DataFrame, split: str, fixed_lim: Optional[float] = None):
     fig, ax = plt.subplots(figsize=(5.0, 5.0))
     ax.set_title(f"{split} - Final offset to target (target at 0,0)")
     ax.set_xlabel("dx to target (m)")
@@ -183,11 +458,14 @@ def _draw_sr_offset_scatter(df: pd.DataFrame, split: str):
     colors = np.where(sr > 0.5, "#2ca02c", "#d62728")
     ax.scatter(dx, dy, s=14, c=colors, alpha=0.7)
 
-    max_abs = max(
-        max(np.abs(dx).max(initial=0.0), np.abs(dy).max(initial=0.0)),
-        max(SR_THRESHOLDS) + 3,
-    )
-    lim = float(max_abs + 2.0)
+    if fixed_lim is None:
+        max_abs = max(
+            max(np.abs(dx).max(initial=0.0), np.abs(dy).max(initial=0.0)),
+            max(SR_THRESHOLDS) + 3,
+        )
+        lim = float(max_abs + 2.0)
+    else:
+        lim = float(fixed_lim)
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
     ax.set_aspect("equal", adjustable="box")
@@ -323,8 +601,7 @@ def _prepare_case_map(split: str, index: int, checkpoint_path: str) -> Tuple[Ima
     if not checkpoint_path or not os.path.exists(checkpoint_path):
         return None, "Checkpoint path invalid."
 
-    with open(checkpoint_path, "rb") as f:
-        raw = pickle.load(f)
+    raw = _load_checkpoint_pickle(checkpoint_path)
     traj_by_id = _normalize_checkpoint_data(raw)
     citynav = load_citynav_data(split)
     if index < 0 or index >= len(citynav):
@@ -403,6 +680,11 @@ def main():
         ckpt_easy = os.path.join(experiment_dir, easy_choice) if easy_choice != "(none)" else ""
         ckpt_medium = os.path.join(experiment_dir, medium_choice) if medium_choice != "(none)" else ""
         ckpt_hard = os.path.join(experiment_dir, hard_choice) if hard_choice != "(none)" else ""
+
+        st.markdown("---")
+        st.subheader("HETT checkpoint")
+        default_hett_ckpt = "./HETT/checkpoints/multi/checkpoint_val_unseen.pkl"
+        ckpt_hett = st.text_input("HETT checkpoint path", value=default_hett_ckpt)
         refresh = st.button("Refresh / Recompute", use_container_width=True)
 
     if refresh:
@@ -417,8 +699,12 @@ def main():
         split_df[split] = df
         split_summary[split] = summary
 
+    hett_df, hett_summary = _build_hett_records(ckpt_hett)
+    emh_df = pd.concat([split_df[s] for s in SPLITS if not split_df[s].empty], ignore_index=True)
+    emh_summary = _summary_from_df(emh_df)
+
     # Row 1: table
-    total_count = sum(split_summary[s]["count"] for s in SPLITS)
+    total_count = emh_summary["count"]
     rows = []
     for split in SPLITS:
         c = split_summary[split]["count"]
@@ -434,32 +720,25 @@ def main():
                 "Count": c,
             }
         )
-    if total_count > 0:
-        total_ne = float(
-            sum(split_summary[s]["ne"] * split_summary[s]["count"] for s in SPLITS) / total_count
-        )
-        total_sr = float(
-            sum(split_summary[s]["sr"] * split_summary[s]["count"] for s in SPLITS) / total_count
-        )
-        total_osr = float(
-            sum(split_summary[s]["osr"] * split_summary[s]["count"] for s in SPLITS) / total_count
-        )
-        total_spl = float(
-            sum(split_summary[s]["spl"] * split_summary[s]["count"] for s in SPLITS) / total_count
-        )
-    else:
-        total_ne = np.nan
-        total_sr = np.nan
-        total_osr = np.nan
-        total_spl = np.nan
+    rows.append(
+        {
+            "Split": "hett",
+            "NE": hett_summary["ne"],
+            "SR": hett_summary["sr"],
+            "OSR": hett_summary["osr"],
+            "SPL": hett_summary["spl"],
+            "Weight": np.nan,
+            "Count": hett_summary["count"],
+        }
+    )
 
     rows.append(
         {
             "Split": "total",
-            "NE": total_ne,
-            "SR": total_sr,
-            "OSR": total_osr,
-            "SPL": total_spl,
+            "NE": emh_summary["ne"],
+            "SR": emh_summary["sr"],
+            "OSR": emh_summary["osr"],
+            "SPL": emh_summary["spl"],
             "Weight": 1.0 if total_count > 0 else np.nan,
             "Count": total_count,
         }
@@ -490,6 +769,14 @@ def main():
         st.pyplot(_draw_ne_distribution(split_df["medium"], "medium"), use_container_width=True)
     with c3:
         st.pyplot(_draw_ne_distribution(split_df["hard"], "hard"), use_container_width=True)
+    c4, c5 = st.columns(2)
+    with c4:
+        st.pyplot(
+            _draw_ne_distribution(emh_df, "total (easy+medium+hard)"),
+            use_container_width=True,
+        )
+    with c5:
+        st.pyplot(_draw_ne_distribution(hett_df, "hett"), use_container_width=True)
 
     # Row 3: SR offset scatter
     st.subheader("3) SR offset analysis (target normalized to (0,0))")
@@ -500,6 +787,35 @@ def main():
         st.pyplot(_draw_sr_offset_scatter(split_df["medium"], "medium"), use_container_width=True)
     with s3:
         st.pyplot(_draw_sr_offset_scatter(split_df["hard"], "hard"), use_container_width=True)
+    compare_scatter_lim = _shared_sr_offset_limit(emh_df, hett_df)
+    s4, s5 = st.columns(2)
+    with s4:
+        st.pyplot(
+            _draw_sr_offset_scatter(emh_df, "total (easy+medium+hard)", fixed_lim=compare_scatter_lim),
+            use_container_width=False,
+        )
+    with s5:
+        st.pyplot(
+            _draw_sr_offset_scatter(hett_df, "hett", fixed_lim=compare_scatter_lim),
+            use_container_width=False,
+        )
+
+    st.subheader("Initial Heading NE analysis初始航向东北分析")
+    st.caption(
+        "bin size = 15° | range = [-180, 180]° | metric = mean NE to goal (mean_final_pos_to_goal_dist) | "
+        "initial heading = drone start_pose.yaw (degrees, wrapped)"
+    )
+    ih_c1, ih_c2 = st.columns(2)
+    with ih_c1:
+        st.pyplot(
+            _draw_initial_heading_polar(emh_df, "total (easy+medium+hard) — initial heading vs mean NE"),
+            use_container_width=True,
+        )
+    with ih_c2:
+        st.pyplot(
+            _draw_initial_heading_polar(hett_df, "hett — initial heading vs mean NE"),
+            use_container_width=True,
+        )
 
     # Row 4: NE deep dive
     st.subheader("4) NE deep-dive analysis")
@@ -647,6 +963,35 @@ def main():
                     else:
                         st.image(image, width=640)
                         st.caption(caption)
+
+    # Row 6: SR threshold comparison
+    st.subheader("6) SR threshold comparison (total vs HETT)")
+    emh_sr_curve = _compute_sr_at_thresholds(emh_df, SR_COMPARE_THRESHOLDS)
+    hett_sr_curve = _compute_sr_at_thresholds(hett_df, SR_COMPARE_THRESHOLDS)
+    st.pyplot(
+        _draw_sr_threshold_comparison(SR_COMPARE_THRESHOLDS, emh_sr_curve, hett_sr_curve),
+        use_container_width=True,
+    )
+
+    threshold_table = pd.DataFrame(
+        {
+            "threshold": SR_COMPARE_THRESHOLDS,
+            "sr_total_emh": emh_sr_curve,
+            "sr_hett": hett_sr_curve,
+            "sr_delta_hett_minus_total": hett_sr_curve - emh_sr_curve,
+        }
+    )
+    st.dataframe(
+        threshold_table.style.format(
+            {
+                "threshold": "{:.0f}",
+                "sr_total_emh": "{:.4f}",
+                "sr_hett": "{:.4f}",
+                "sr_delta_hett_minus_total": "{:+.4f}",
+            }
+        ),
+        use_container_width=True,
+    )
 
 
 if __name__ == "__main__":

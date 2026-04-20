@@ -198,6 +198,132 @@ def accuracy_reward(completions, solution, **kwargs):
     return rewards
 
 
+def gaussian_accuracy_reward(completions, solution, **kwargs):
+    """
+    GUI-G² style Gaussian reward for CityNav.
+ 
+    R_total = v * R_point + gamma * R_coverage + R_format
+    """
+    contents = [completion[0]["content"] for completion in completions]
+    rewards = []
+    # Hyperparameters
+    alpha = 0.5    # adaptive variance scaling factor (paper default)
+    nu = 1.0       # weight for point reward
+    gamma = 1.0    # weight for coverage reward
+    for content, sol in zip(contents, solution):
+        try:
+            sol = ast.literal_eval(sol)
+        except Exception as e:
+            print(e)
+            rewards.append(0.0)
+            continue
+        gt_target = sol['target_position']          # [x, y]
+        gt_landmark_bboxes = sol['landmark_bbox']   # [[x1,y1,x2,y2], ...]
+        # ========== Parse model output ==========
+        target_matches = re.findall(
+            r'"target_location"\s*:\s*\[(\d+),\s*(\d+)\]', content
+        )
+        bbox_matches = re.findall(
+            r'"landmark_bbox"\s*:\s*\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]', content
+        )
+        if not target_matches:
+            rewards.append(0.0)
+            continue
+        pred_target = list(map(int, target_matches[0]))
+        pred_bbox = list(map(int, bbox_matches[0])) if bbox_matches else None
+        # ========== R_point: Gaussian Point Reward ==========
+        # Find the closest GT landmark bbox to compute adaptive sigma
+        # σx = α * bbox_width, σy = α * bbox_height
+        best_r_point = 0.0
+        for gt_bbox in gt_landmark_bboxes:
+            bbox_w = gt_bbox[2] - gt_bbox[0]
+            bbox_h = gt_bbox[3] - gt_bbox[1]
+            # Adaptive variance based on landmark size
+            sigma_x = max(alpha * bbox_w, 1.0)   # avoid division by zero
+            sigma_y = max(alpha * bbox_h, 1.0)
+            # GT center (use target_position as the point GT)
+            gt_x, gt_y = gt_target
+            pred_x, pred_y = pred_target
+            # Gaussian point reward
+            r_point = np.exp(
+                -0.5 * (
+                    ((pred_x - gt_x) ** 2) / (sigma_x ** 2) +
+                    ((pred_y - gt_y) ** 2) / (sigma_y ** 2)
+                )
+            )
+            best_r_point = max(best_r_point, r_point)
+        # ========== R_coverage: Gaussian Coverage Reward ==========
+        best_r_coverage = 0.0
+        if pred_bbox is not None:
+            for gt_bbox in gt_landmark_bboxes:
+                r_cov = _bhattacharyya_reward(pred_bbox, gt_bbox)
+                best_r_coverage = max(best_r_coverage, r_cov)
+        # ========== Total reward ==========
+        reward = nu * best_r_point + gamma * best_r_coverage
+        rewards.append(reward)
+        # Debug logging
+        if os.getenv("DEBUG_MODE") == "true":
+            log_path = os.getenv("LOG_PATH")
+            current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
+            with open(log_path, "a") as f:
+                f.write(f"--- {current_time} ---\n")
+                f.write(f"R_point={best_r_point:.4f}, R_coverage={best_r_coverage:.4f}, "
+                        f"total={reward:.4f}\n")
+                f.write(f"pred_target={pred_target}, gt_target={gt_target}\n")
+                f.write(f"pred_bbox={pred_bbox}\n\n")
+    return rewards
+
+def _bhattacharyya_reward(pred_bbox, gt_bbox):
+    """
+    Gaussian Coverage Reward using Bhattacharyya coefficient.
+    Models each bbox as a 2D Gaussian:
+      mean = bbox center, covariance = diag(σx², σy²)
+      where σx = 0.5 * width, σy = 0.5 * height
+    Bhattacharyya coefficient:
+      BC = exp(-1/8 * (μp-μg)^T Σ^{-1} (μp-μg) - 1/2 * ln(det(Σ)/sqrt(det(Σp)*det(  Σg))))
+      where Σ = (Σp + Σg) / 2
+    """
+    alpha = 0.5
+  
+    # Predicted bbox → Gaussian
+    pred_cx = (pred_bbox[0] + pred_bbox[2]) / 2.0
+    pred_cy = (pred_bbox[1] + pred_bbox[3]) / 2.0
+    pred_sx = max(alpha * (pred_bbox[2] - pred_bbox[0]), 1.0)
+    pred_sy = max(alpha * (pred_bbox[3] - pred_bbox[1]), 1.0)
+  
+    # GT bbox → Gaussian
+    gt_cx = (gt_bbox[0] + gt_bbox[2]) / 2.0
+    gt_cy = (gt_bbox[1] + gt_bbox[3]) / 2.0
+    gt_sx = max(alpha * (gt_bbox[2] - gt_bbox[0]), 1.0)
+    gt_sy = max(alpha * (gt_bbox[3] - gt_bbox[1]), 1.0)
+  
+    # Averaged covariance: Σ = (Σp + Σg) / 2
+    # Since both are diagonal: Σ_avg_x = (σpx² + σgx²) / 2
+    avg_var_x = (pred_sx ** 2 + gt_sx ** 2) / 2.0
+    avg_var_y = (pred_sy ** 2 + gt_sy ** 2) / 2.0
+  
+    # Term 1: Mahalanobis distance
+    mahal = (1.0 / 8.0) * (
+        ((pred_cx - gt_cx) ** 2) / avg_var_x +
+        ((pred_cy - gt_cy) ** 2) / avg_var_y
+    )
+  
+    # Term 2: Covariance normalization
+    # det(Σ_avg) = avg_var_x * avg_var_y  (diagonal)
+    # det(Σp) = pred_sx² * pred_sy²
+    # det(Σg) = gt_sx² * gt_sy²
+    det_avg = avg_var_x * avg_var_y
+    det_pred = (pred_sx ** 2) * (pred_sy ** 2)
+    det_gt = (gt_sx ** 2) * (gt_sy ** 2)
+  
+    log_term = 0.5 * np.log(det_avg / np.sqrt(det_pred * det_gt))
+  
+    # Bhattacharyya coefficient
+    r_coverage = np.exp(-mahal - log_term)
+  
+    return r_coverage
+
+
 def format_reward(completions, **kwargs):
     """Reward function that checks if the completion has a specific format."""
     pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
@@ -227,8 +353,13 @@ def format_reward(completions, **kwargs):
     return rewards
 
 
+# reward_funcs_registry = {
+#     "accuracy": accuracy_reward,
+#     "format": format_reward,
+# }
+
 reward_funcs_registry = {
-    "accuracy": accuracy_reward,
+    "accuracy": gaussian_accuracy_reward,
     "format": format_reward,
 }
 
@@ -250,6 +381,18 @@ from PIL import Image
 import random
 
 SYSTEM_PROMPT = "You are an intelligent autonomous aerial vehicle (UAV) equipped for real-world navigation and visual target localization."
+
+# GRPO training export format (one dict per training sample). Not the same as HETT
+# processed_citynav/citynav_*.json (MTurk trajectory lists: trajectory, descriptions, area, …).
+CITYNAV_GRPO_REQUIRED_KEYS = (
+    "image_path",
+    "start_position",
+    "target_description",
+    "landmark_bbox",
+    "target_position",
+)
+
+
 class CitynavDataset(Dataset):
     def __init__(self, data_path: str, script_args: GRPOScriptArguments):
         super(CitynavDataset, self).__init__()
@@ -258,6 +401,24 @@ class CitynavDataset(Dataset):
 
         with open(data_path, 'r') as f:
             citynav_data = json.load(f)
+        if not isinstance(citynav_data, list):
+            raise ValueError(
+                f"Expected dataset JSON to be a list of samples, got {type(citynav_data).__name__}. Path: {data_path!r}"
+            )
+        if len(citynav_data) == 0:
+            raise ValueError(f"Dataset JSON is empty: {data_path!r}")
+        missing = [k for k in CITYNAV_GRPO_REQUIRED_KEYS if k not in citynav_data[0]]
+        if missing:
+            found = list(citynav_data[0].keys())
+            raise ValueError(
+                "Dataset JSON does not match GRPO CityNav export format. "
+                f"Missing keys on first item: {missing}. Found keys: {found}. "
+                "This file cannot be HETT `processed_citynav/citynav_*.json` (MTurk trajectories): "
+                "those records use fields like trajectory, descriptions, area — not image_path / landmark_bbox. "
+                "Use a JSON produced for this script (image_path + labels), or add a conversion pipeline. "
+                f"Path: {data_path!r}"
+            )
+
         for step_data in citynav_data:
             item = {}
             image_path = script_args.image_folders + step_data['image_path']

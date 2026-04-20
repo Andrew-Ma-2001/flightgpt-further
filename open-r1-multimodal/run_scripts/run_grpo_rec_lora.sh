@@ -1,7 +1,7 @@
 export DEBUG_MODE="true"
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-RUN_NAME="FlightGPT"
+RUN_NAME="FlightGPT_GRPO_GUIG2reward_Lora"
 CURRENT_DIR=$(pwd)
 export LOG_PATH="$CURRENT_DIR/experiment/debug_log_$RUN_NAME.txt"
 

@@ -14,7 +14,7 @@ torchrun --nproc_per_node="4" \
     --deepspeed $CURRENT_DIR/open-r1-multimodal/local_scripts/zero2.json \
     --output_dir $CURRENT_DIR/experiment/$RUN_NAME \
     --model_name_or_path $CURRENT_DIR/model_weight/Qwen2.5-VL-7B-Instruct \
-    --dataset_name $CURRENT_DIR/data/training_data/citynav_train_data.json \
+    --dataset_name /home/yjy/flightgpt/FlightGPT/refine_citynav/processed_citynav/citynav_train_seen.json \
     --image_folders $CURRENT_DIR/data/training_data/images \
     --max_prompt_length 1024 \
     --max_completion_length 512 \
