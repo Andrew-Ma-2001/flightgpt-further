@@ -1,7 +1,7 @@
 export DEBUG_MODE="true"
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-RUN_NAME="FlightGPT_newdataset"
+RUN_NAME="FlightGPT_GRPO_GUIG2reward_Lora_newdataset_only_point_reward"
 CURRENT_DIR=$(pwd)
 export LOG_PATH="$CURRENT_DIR/experiment/debug_log_$RUN_NAME.txt"
 
@@ -14,7 +14,7 @@ torchrun --nproc_per_node="4" \
     --deepspeed $CURRENT_DIR/open-r1-multimodal/local_scripts/zero2.json \
     --output_dir $CURRENT_DIR/experiment/$RUN_NAME \
     --model_name_or_path $CURRENT_DIR/model_weight/Qwen2.5-VL-7B-Instruct \
-    --dataset_name /home/yjy/flightgpt/FlightGPT/refine_citynav/processed_citynav/citynav_train_seen.json \
+    --dataset_name $CURRENT_DIR/data/training_data/citynav_train_data_refine.json \
     --image_folders $CURRENT_DIR/data/training_data/images \
     --max_prompt_length 1024 \
     --max_completion_length 512 \

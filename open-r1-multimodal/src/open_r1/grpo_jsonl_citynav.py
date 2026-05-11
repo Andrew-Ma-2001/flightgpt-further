@@ -209,7 +209,7 @@ def gaussian_accuracy_reward(completions, solution, **kwargs):
     # Hyperparameters
     alpha = 0.5    # adaptive variance scaling factor (paper default)
     nu = 1.0       # weight for point reward
-    gamma = 1.0    # weight for coverage reward
+    gamma = 0.0    # weight for coverage reward
     for content, sol in zip(contents, solution):
         try:
             sol = ast.literal_eval(sol)
@@ -324,6 +324,70 @@ def _bhattacharyya_reward(pred_bbox, gt_bbox):
     return r_coverage
 
 
+def fixed_variance_gaussian_accuracy_reward(completions, solution, **kwargs):
+    """
+    固定方差版高斯点奖励 —— 仅关注目标点定位精度。
+    R_total = nu * R_point   （不含 coverage，不含自适应方差）
+    """
+    import re
+    import numpy as np
+    import ast
+    import os
+    from datetime import datetime
+
+    contents = [completion[0]["content"] for completion in completions]
+    rewards = []
+
+    # ===== 配置参数（可按需调整） =====
+    SIGMA = 200.0          # 固定像素级标准差 (σ_x = σ_y = 20)
+    NU = 1.0              # 点奖励权重（通常保持 1.0 即可）
+
+    for content, sol in zip(contents, solution):
+        # 解析 GT
+        try:
+            sol = ast.literal_eval(sol)
+        except Exception:
+            rewards.append(0.0)
+            continue
+
+        gt_target = sol['target_position']   # [x, y]
+
+        # 解析模型输出
+        target_matches = re.findall(
+            r'"target_location"\s*:\s*\[(\d+),\s*(\d+)\]', content
+        )
+        if not target_matches:
+            rewards.append(0.0)
+            continue
+
+        pred_target = list(map(int, target_matches[0]))
+        pred_x, pred_y = pred_target
+        gt_x, gt_y = gt_target
+
+        # ===== 固定方差高斯点奖励 =====
+        # σ_x = σ_y = SIGMA
+        r_point = np.exp(
+            -0.5 * (((pred_x - gt_x) ** 2 + (pred_y - gt_y) ** 2) / (SIGMA ** 2))
+        )
+
+        reward = NU * r_point
+        rewards.append(reward)
+
+        # 调试日志（可选）
+        if os.getenv("DEBUG_MODE") == "true":
+            log_path = os.getenv("LOG_PATH")
+            if log_path:
+                current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
+                with open(log_path, "a") as f:
+                    f.write(
+                        f"--- {current_time} ---\n"
+                        f"pred=({pred_x},{pred_y}), gt=({gt_x},{gt_y}), "
+                        f"dist={np.hypot(pred_x - gt_x, pred_y - gt_y):.1f}px, "
+                        f"reward={reward:.4f}\n"
+                    )
+
+    return rewards
+
 def format_reward(completions, **kwargs):
     """Reward function that checks if the completion has a specific format."""
     pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
@@ -362,6 +426,11 @@ reward_funcs_registry = {
     "accuracy": gaussian_accuracy_reward,
     "format": format_reward,
 }
+
+# reward_funcs_registry = {
+#     "accuracy": fixed_variance_gaussian_accuracy_reward,
+#     "format": format_reward,
+# }
 
 @dataclass
 class GRPOModelConfig(ModelConfig):

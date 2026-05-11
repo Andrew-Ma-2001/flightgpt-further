@@ -319,7 +319,7 @@ def main():
     overall_start = time.time()
     
     # 用 new 来表示新数据集，修改上面 绝对路径以及 gsmllavanav 的 default path 路径
-    for split in ["easy"]:
+    for split in ["new"]:
     # for split in ["easy", "medium", "hard"]:
         print("\n" + "=" * 60)
         print(f"Processing split: {split.upper()}")

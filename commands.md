@@ -9,6 +9,11 @@ cd /home/yjy/flightgpt/FlightGPT && source /home/yjy/miniconda3/etc/profile.d/co
     --base_model ./model_weight/Qwen2.5-VL-7B-Instruct \
     --lora_adapter ./experiment/FlightGPT_GRPO_GUIG2reward_Lora/checkpoint-2379 \
     --output_dir ./model_weight/FlightGPT_GRPO_GUIG2
+
+cd /home/yjy/flightgpt/FlightGPT && source /home/yjy/miniconda3/etc/profile.d/conda.sh && conda activate flightgpt && python merge_grpo_lora.py \
+    --base_model ./model_weight/Qwen2.5-VL-7B-Instruct \
+    --lora_adapter ./experiment/FlightGPT_GRPO_GUIG2reward_Lora_newdataset_fixed_variance_gaussian_reward200/checkpoint-2377 \
+    --output_dir ./model_weight/FlightGPT_GRPO_GUIG2_FIXEDVARIANCE_GAUSSIAN_REWARD200
 ```
 
 #### 启动vLLM server，对应 grpo 训练模型，qwen2.5-vl-7b, flightgpt sft 模型
@@ -19,6 +24,17 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/FlightGPT_GRPO_Merged   -
 CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/Qwen2.5-VL-7B-Instruct   --dtype auto   --trust-remote-code   --served-model-name qwen_2_5_vl_7b   --host 0.0.0.0   -tp 4   --port 8989   --limit-mm-per-prompt image=2,video=0   --max-model-len=32000
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/Flightgpt_SFT   --dtype auto   --trust-remote-code   --served-model-name qwen_2_5_vl_7b_sft   --host 0.0.0.0   -tp 4   --port 8989   --limit-mm-per-prompt image=2,video=0   --max-model-len=32000
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve ./model_weight/FlightGPT_GRPO_GUIG2_NEWDATA \
+  --dtype auto \
+  --trust-remote-code \
+  --served-model-name qwen_2_5_vl_7b \
+  --host 0.0.0.0 \
+  -tp 4 \
+  --uvicorn-log-level debug \
+  --port 8989 \
+  --limit-mm-per-prompt image=2,video=0 \
+  --max-model-len=32000
 ```
 
 ##### 可视化部分
