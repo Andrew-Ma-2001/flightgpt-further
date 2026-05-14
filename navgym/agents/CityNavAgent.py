@@ -67,10 +67,19 @@ class GPTAgent:
         self.scale = scale
         self.top_left = top_left
         self.compress_images = compress_images
-        self.image_scale_factor = 1.0  # Track image resize scale
+        self.image_scale_factor = (1.0, 1.0)  # Track image resize scale
+        self._client = None
+        self.last_debug = {}
 
-
-    def act(self, cur_whole_map, cur_rgb_drone, cur_position):
+    def act(
+        self,
+        cur_whole_map,
+        cur_rgb_drone,
+        cur_position,
+        max_tokens=2000,
+        stream=False,
+        use_image=True,
+    ):
         # Optionally resize images to reduce VLLM throughput pressure
         if self.compress_images:
             start_time = time.time()
@@ -100,7 +109,10 @@ class GPTAgent:
             system_prompt=self.system_prompt, 
             prompt=get_prompt(
                 instruction=self.target_description, cur_pose=scaled_position
-            )
+            ),
+            max_tokens=max_tokens,
+            stream=stream,
+            use_image=use_image,
         )
         response = result.choices[0].message.content
         return response
@@ -113,7 +125,11 @@ class GPTAgent:
         Returns:
             Scaled coordinates in original image space
         """
-        scale_x, scale_y = self.image_scale_factor
+        if isinstance(self.image_scale_factor, (int, float)):
+            scale_x = float(self.image_scale_factor)
+            scale_y = float(self.image_scale_factor)
+        else:
+            scale_x, scale_y = self.image_scale_factor
         
         if len(coordinates) == 2:
             # Point coordinates [x, y]
@@ -146,43 +162,43 @@ class GPTAgent:
             # Check file size
             file_size_mb = os.path.getsize(image_path) / (1024 * 1024)
             
-            # Load image
-            img = Image.open(image_path)
-            original_size = img.size
-            
-            # Check if resizing is needed
-            if max(img.size) > max_size or file_size_mb > 5:
-                print(f"  [{image_type}] Original: {img.size} ({file_size_mb:.2f}MB) - Resizing to max {max_size}px")
-                
-                # Calculate scale factor before resizing
-                original_width, original_height = img.size
-                
-                # Resize maintaining aspect ratio
-                img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-                new_width, new_height = img.size
-                
-                # Calculate scale factors (resized / original)
-                scale_x = new_width / original_width
-                scale_y = new_height / original_height
-                
-                # Save resized image
-                resized_path = image_path.replace('.jpg', '_resized.jpg').replace('.png', '_resized.png')
-                if resized_path == image_path:  # fallback if no extension
-                    resized_path = image_path + '_resized.jpg'
-                
-                # Save with quality optimization
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    img = img.convert('RGB')
-                img.save(resized_path, 'JPEG', quality=85, optimize=True)
-                
-                new_size_mb = os.path.getsize(resized_path) / (1024 * 1024)
-                print(f"  [{image_type}] Resized: {img.size} ({new_size_mb:.2f}MB)")
-                print(f"  [{image_type}] Scale factor: x={scale_x:.4f}, y={scale_y:.4f}")
-                
-                return resized_path, (scale_x, scale_y)
-            else:
-                print(f"  [{image_type}] Size OK: {img.size} ({file_size_mb:.2f}MB)")
-                return image_path, (1.0, 1.0)
+            with Image.open(image_path) as img:
+                original_size = img.size
+
+                # Check if resizing is needed
+                if max(img.size) > max_size or file_size_mb > 5:
+                    print(f"  [{image_type}] Original: {img.size} ({file_size_mb:.2f}MB) - Resizing to max {max_size}px")
+
+                    # Calculate scale factor before resizing
+                    original_width, original_height = img.size
+
+                    # Resize maintaining aspect ratio
+                    img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    new_width, new_height = img.size
+
+                    # Calculate scale factors (resized / original)
+                    scale_x = new_width / original_width
+                    scale_y = new_height / original_height
+
+                    # Save resized image
+                    resized_path = image_path.replace('.jpg', '_resized.jpg').replace('.png', '_resized.png')
+                    if resized_path == image_path:  # fallback if no extension
+                        resized_path = image_path + '_resized.jpg'
+
+                    # Save with quality optimization
+                    img_to_save = img
+                    if img.mode in ('RGBA', 'LA', 'P'):
+                        img_to_save = img.convert('RGB')
+                    img_to_save.save(resized_path, 'JPEG', quality=85, optimize=True)
+
+                    new_size_mb = os.path.getsize(resized_path) / (1024 * 1024)
+                    print(f"  [{image_type}] Resized: {img.size} ({new_size_mb:.2f}MB)")
+                    print(f"  [{image_type}] Scale factor: x={scale_x:.4f}, y={scale_y:.4f}")
+
+                    return resized_path, (scale_x, scale_y)
+                else:
+                    print(f"  [{image_type}] Size OK: {img.size} ({file_size_mb:.2f}MB)")
+                    return image_path, (1.0, 1.0)
                 
         except Exception as e:
             print(f"  [WARNING] Failed to check/resize {image_type}: {e}")
@@ -203,24 +219,57 @@ class GPTAgent:
 
         return f"data:{mime_type};base64,{base64_encoded_data}"
 
-    def _gpt4o_imagefile(self, map_file, view_file, system_prompt, prompt,
-                         timeout=120.0):
+    def _get_client(self, timeout=120.0):
+        if self._client is None:
+            self._client = OpenAI(
+                base_url=self.gpt_info.api_base,
+                api_key=self.gpt_info.api_key,
+                timeout=timeout,
+            )
+        return self._client
+
+    def close(self):
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def _gpt4o_imagefile(
+        self,
+        map_file,
+        view_file,
+        system_prompt,
+        prompt,
+        timeout=120.0,
+        max_tokens=2000,
+        stream=False,
+        use_image=True,
+    ):
         """
         Gpt-4o model with timeout, fail fast on error
         """
-        client = OpenAI(
-            base_url=self.gpt_info.api_base,
-            api_key=self.gpt_info.api_key,
-            timeout=timeout,
-        )
+        client = self._get_client(timeout=timeout)
 
         # Time the base64 encoding
-        encode_start = time.time()
-        map_data_url = self._local_image_to_data_url(map_file)
-        encode_time = time.time() - encode_start
+        map_data_url = None
+        map_base64_len = 0
+        encode_time = 0.0
+        if use_image:
+            encode_start = time.time()
+            map_data_url = self._local_image_to_data_url(map_file)
+            map_base64_len = len(map_data_url)
+            encode_time = time.time() - encode_start
         
         if encode_time > 1.0:
             print(f"  [Base64 Encode] took {encode_time:.2f}s")
+
+        user_content = [{"type": "text", "text": prompt}]
+        if use_image and map_data_url is not None:
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": map_data_url},
+                }
+            )
 
         api_start = time.time()
         response = client.chat.completions.create(
@@ -232,19 +281,23 @@ class GPTAgent:
                 },
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": map_data_url},
-                        }
-                    ],
+                    "content": user_content,
                 },
             ],
-            max_tokens=2000,
+            max_tokens=max_tokens,
             temperature=0.0,
             timeout=timeout,
+            stream=stream,
         )
         api_time = time.time() - api_start
         print(f"  [API Call] took {api_time:.2f}s")
+        self.last_debug = {
+            "encode_time_s": encode_time,
+            "map_base64_len": map_base64_len,
+            "api_time_s": api_time,
+            "max_tokens": max_tokens,
+            "stream": stream,
+            "use_image": use_image,
+        }
+        del map_data_url
         return response

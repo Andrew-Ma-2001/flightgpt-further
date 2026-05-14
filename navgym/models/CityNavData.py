@@ -40,7 +40,8 @@ class CityNavData:
             self, path, fix_altitude=50, max_dist_marker_to_target=1000000, 
             map_shape=(240, 240), map_pixels_per_meter=240/410, use_segmentation_mask=True,
             use_bbox_confidence=False, box_threshold=0.2, text_threshold=0.25,
-            max_box_size=50, max_box_area=3000, image_dir="./data/rgbd-new"
+            max_box_size=50, max_box_area=3000, image_dir="./data/rgbd-new",
+            deepcopy_arrays_on_getitem=True,
         ):
         """
         Used to store city navigation data
@@ -82,6 +83,7 @@ class CityNavData:
         ]
 
         self.data_len = len(self.episodes)
+        self.deepcopy_arrays_on_getitem = deepcopy_arrays_on_getitem
 
         self._raster_cache = {
             raster_path.stem: rasterio.open(raster_path)
@@ -147,7 +149,15 @@ class CityNavData:
         ]
         return SingleCityNavData(
             episode=self.episodes[idx], map=self.maps[idx], 
-            rgb=deepcopy(self._rgb_cache[self.episodes[idx].map_name]), 
-            height=deepcopy(self._height_cache[self.episodes[idx].map_name]),
+            rgb=(
+                deepcopy(self._rgb_cache[self.episodes[idx].map_name])
+                if self.deepcopy_arrays_on_getitem
+                else self._rgb_cache[self.episodes[idx].map_name]
+            ),
+            height=(
+                deepcopy(self._height_cache[self.episodes[idx].map_name])
+                if self.deepcopy_arrays_on_getitem
+                else self._height_cache[self.episodes[idx].map_name]
+            ),
             px_list=px_list, raster=self._raster_cache[self.episodes[idx].map_name]
         )

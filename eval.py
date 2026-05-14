@@ -1,8 +1,11 @@
 import os
 import sys
 import re
+import gc
+import argparse
 import cv2
 import json
+import hashlib
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -10,10 +13,12 @@ from tqdm import tqdm
 import pickle
 import time
 import traceback
+import tracemalloc
+import psutil
 from openai import APITimeoutError
 from navgym.models.CityNavData import CityNavData
 from navgym.models.NavGym import NavGym
-from navgym.agents.CityNavAgent import GPTAgent
+from navgym.agents.CityNavAgent import GPTAgent, get_prompt
 from navgym.tools.EvalTools import eval_planning_metrics
 from gsamllavanav.observation import cropclient
 from gsamllavanav.mapdata import GROUND_LEVEL
@@ -45,9 +50,58 @@ NEW_DATA_DIR = "/home/yjy/flightgpt/FlightGPT/refine_citynav/processed_citynav"
 DATA_DIR = MTURK_TRAJECTORY_DIR
 CITYREFER_DIR = CITYREFER_DATA_DIR
 
+
+_MEM_DEBUG = os.environ.get("MEM_DEBUG", "0") == "1"
+_MEM_TRACE_EVERY = int(os.environ.get("MEM_TRACE_EVERY", "100"))
+_MEM_REPORT_EVERY = int(os.environ.get("MEM_REPORT_EVERY", "20"))
+_PROCESS = psutil.Process(os.getpid())
+_MEM_SNAPSHOT_START = None
+
+
+def _rss_mb():
+    return _PROCESS.memory_info().rss / 1024 / 1024
+
+
+def mem_report(tag, extra=None, force_gc=True):
+    if not _MEM_DEBUG:
+        return
+    if force_gc:
+        gc.collect()
+    msg = f"[MEM] {tag} RSS={_rss_mb():.2f} MB"
+    if extra:
+        msg += f" | {extra}"
+    print(msg, flush=True)
+
+
+def mem_trace_report(i):
+    if not _MEM_DEBUG or _MEM_SNAPSHOT_START is None:
+        return
+    if i <= 0 or i % _MEM_TRACE_EVERY != 0:
+        return
+    gc.collect()
+    snapshot_now = tracemalloc.take_snapshot()
+    stats = snapshot_now.compare_to(_MEM_SNAPSHOT_START, "lineno")
+    print("\n[TRACEMALLOC] Top memory growth:", flush=True)
+    for stat in stats[:20]:
+        print(stat, flush=True)
+
+
+def maybe_print_torch_mem(tag):
+    if not _MEM_DEBUG:
+        return
+    try:
+        import torch
+        if torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated() / 1024 / 1024
+            reserved = torch.cuda.memory_reserved() / 1024 / 1024
+            print(f"[MEM][CUDA] {tag} allocated={alloc:.2f}MB reserved={reserved:.2f}MB", flush=True)
+    except Exception:
+        return
+
 def create_dir(file_path):
     dir_path = os.path.dirname(file_path)
-    os.makedirs(dir_path, exist_ok=True)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
 
 def initialize_agent(navGym):
     return GPTAgent(
@@ -141,6 +195,93 @@ def calculate_mean_metrics(results, nums):
 
 # ============ Checkpoint utilities ============
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="FlightGPT eval runner with memory diagnostics")
+    parser.add_argument("--split", default="new", help="Dataset split name (default: new)")
+    parser.add_argument("--limit", type=int, default=None, help="Only evaluate first N samples")
+    parser.add_argument("--step-num", type=int, default=2, help="Total planning steps")
+    parser.add_argument("--action-num", type=int, default=75, help="Max actions per planning step")
+    parser.add_argument("--max-workers", type=int, default=1, help="Reserved concurrency arg for controlled experiments")
+    parser.add_argument("--max-tokens", type=int, default=2000, help="Generation max_tokens for vLLM")
+    parser.add_argument("--stream", action="store_true", help="Use OpenAI streaming mode")
+    parser.add_argument("--dry-run", action="store_true", help="Build sample/prompt only, skip vLLM request")
+    parser.add_argument("--skip-image", action="store_true", help="Send text-only prompt without image")
+    parser.add_argument("--compress-images", type=str, default=None, help="Override API_CONFIG compress_images true/false")
+    parser.add_argument("--disable-checkpoint", action="store_true", help="Do not read/write pickle checkpoint")
+    parser.add_argument("--output-jsonl", type=str, default=None, help="Stream eval records to this JSONL")
+    parser.add_argument("--resume-jsonl", type=str, default=None, help="Read completed IDs from existing JSONL")
+    parser.add_argument("--mem-report-every", type=int, default=20, help="Print memory every N samples")
+    parser.add_argument("--mem-trace-every", type=int, default=100, help="Print tracemalloc diff every N samples")
+    parser.add_argument("--print-env", action="store_true", help="Print environment/package diagnostics and exit")
+    parser.add_argument("--deepcopy-arrays", action="store_true", help="Deepcopy RGB/depth arrays in CityNavData.__getitem__")
+    return parser.parse_args()
+
+
+def apply_sample_limit(citynavData, limit):
+    if limit is None or limit <= 0:
+        return
+    if limit >= len(citynavData):
+        return
+    citynavData.episodes = citynavData.episodes[:limit]
+    citynavData.maps = citynavData.maps[:limit]
+    citynavData.data_len = limit
+
+
+def hash_text(text):
+    if text is None:
+        return None
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def iter_jsonl(path):
+    if path is None or not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def load_completed_ids_from_jsonl(path):
+    completed = set()
+    for row in iter_jsonl(path):
+        if row.get("ok"):
+            sid = row.get("id")
+            if sid is not None:
+                completed.add(sid)
+    return completed
+
+
+def append_jsonl(path, record):
+    create_dir(path)
+    with open(path, "a", encoding="utf-8") as fout:
+        fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+        fout.flush()
+
+
+def print_env_diagnostics():
+    print("\n[ENV] python executable:", sys.executable)
+    print("[ENV] python version:", sys.version.replace("\n", " "))
+    print("[ENV] uname:", os.uname())
+    print("[ENV] cpu_count:", os.cpu_count())
+    print("[ENV] MALLOC_ARENA_MAX:", os.environ.get("MALLOC_ARENA_MAX", "<unset>"))
+    libs = [
+        "openai", "httpx", "requests", "aiohttp", "pydantic",
+        "PIL", "numpy", "torch", "transformers", "datasets", "vllm",
+    ]
+    for name in libs:
+        try:
+            mod = __import__(name)
+            version = getattr(mod, "__version__", "<unknown>")
+            print(f"[ENV] {name}=={version}")
+        except Exception as e:
+            print(f"[ENV] {name}=<unavailable> ({e})")
+
 def get_checkpoint_path(split):
     """Get the pickle checkpoint path for a given split."""
     os.makedirs(SAVE_PATH, exist_ok=True)
@@ -165,14 +306,24 @@ def save_checkpoint(split, trajectory):
 
 # ============ Main evaluation loop ============
 
-def run_nav_gym(citynavData, split, step, action_num):
+def run_nav_gym(citynavData, split, step, action_num, args):
     # Load existing checkpoint — only successful samples are saved
-    trajectory = load_checkpoint(split)
+    trajectory = {} if args.disable_checkpoint else load_checkpoint(split)
     errors = []
 
     completed_ids = set(trajectory.keys())
+    if args.resume_jsonl:
+        completed_from_jsonl = load_completed_ids_from_jsonl(args.resume_jsonl)
+        completed_ids.update(completed_from_jsonl)
+        if completed_from_jsonl:
+            print(f"  [Resume JSONL] Loaded {len(completed_from_jsonl)} completed IDs from {args.resume_jsonl}")
+
+    output_jsonl = args.output_jsonl or os.path.join(SAVE_PATH, f"eval_records_{split}.jsonl")
     total = len(citynavData)
     skipped = 0
+
+    mem_report("before_loop", extra=f"total={total} completed_ids={len(completed_ids)}")
+    maybe_print_torch_mem("before_loop")
 
     for i in tqdm(range(total), desc=f"Running {split}"):
         episode_id = citynavData.episodes[i].id
@@ -190,6 +341,12 @@ def run_nav_gym(citynavData, split, step, action_num):
             pose_history = []
             cur_trajectory = []
             cur_citynavData = citynavData[i]
+            prompt_preview_len = 0
+            response_len = 0
+            last_image_size = None
+            last_image_bytes = 0
+            last_base64_len = 0
+            map_path_for_record = None
             
             for step_idx in range(step):
                 print(f"[Sample {i}] Step {step_idx+1}/{step}")
@@ -203,6 +360,15 @@ def run_nav_gym(citynavData, split, step, action_num):
                 
                 start_pose = navGym.start_pose
                 map_name = navGym.episode.id[0]
+                map_path_for_record = navGym.cur_whole_map
+
+                if os.path.exists(navGym.cur_whole_map):
+                    last_image_bytes = os.path.getsize(navGym.cur_whole_map)
+                    try:
+                        with Image.open(navGym.cur_whole_map) as img:
+                            last_image_size = img.size
+                    except Exception:
+                        last_image_size = None
                 
                 print(f"[Sample {i}] Map: {navGym.cur_whole_map}")
                 print(f"[Sample {i}] Drone: {navGym.cur_rgb_drone}")
@@ -215,19 +381,31 @@ def run_nav_gym(citynavData, split, step, action_num):
                 print(f"[Sample {i}] NavGym created in {navgym_time:.2f}s")
                 
                 agent = initialize_agent(navGym)
+                prompt_preview_len = len(get_prompt(
+                    instruction=navGym.target_description,
+                    cur_pose=navGym._get_px(start_pose),
+                ))
                 
                 print(f"[Sample {i}] Calling agent.act()...")
                 act_start = time.time()
-                
-                result_str = agent.act(
-                    cur_whole_map=navGym.cur_whole_map,
-                    cur_rgb_drone=navGym.cur_rgb_drone,
-                    cur_position=navGym._get_px(start_pose)
-                )
+
+                if args.dry_run:
+                    result_str = '{"landmark_bbox": [0, 0, 0, 0], "target_location": [0, 0]}'
+                else:
+                    result_str = agent.act(
+                        cur_whole_map=navGym.cur_whole_map,
+                        cur_rgb_drone=navGym.cur_rgb_drone,
+                        cur_position=navGym._get_px(start_pose),
+                        max_tokens=args.max_tokens,
+                        stream=args.stream,
+                        use_image=not args.skip_image,
+                    )
+                    last_base64_len = int(agent.last_debug.get("map_base64_len", 0))
                 
                 act_time = time.time() - act_start
                 print(f"[Sample {i}] agent.act() completed in {act_time:.2f}s")
                 print(f"[Sample {i}] Response length: {len(result_str)} chars")
+                response_len = len(result_str)
 
                 landmark_bbox_resized = parse_bbox(result_str, "landmark_bbox")
                 target_pred_px_resized = parse_location(result_str)
@@ -260,15 +438,58 @@ def run_nav_gym(citynavData, split, step, action_num):
                     if len(move_trajectory) > 0:
                         pose_history.append(move_trajectory[-1])
                     cur_trajectory.extend(move_trajectory)
+                agent.close()
+                del navGym, agent, move_trajectory
             
             total_time = time.time() - sample_start
             print(f"[Sample {i}] ✓ SUCCESS in {total_time:.2f}s")
             print(f"{'='*60}\n")
-            
+
+            # Save compact record immediately (streaming JSONL)
+            record = {
+                "id": episode_id,
+                "ok": True,
+                "split": split,
+                "sample_index": i,
+                "duration_s": total_time,
+                "step_num": step,
+                "action_num": action_num,
+                "prediction_text_chars": response_len,
+                "target_pred_px": target_pred_px,
+                "image_path": map_path_for_record,
+                "image_bytes": last_image_bytes,
+                "image_size": last_image_size,
+                "prompt_chars": prompt_preview_len,
+                "base64_chars": last_base64_len,
+                "target_desc_hash": hash_text(cur_citynavData.episode.target_description),
+                "stream": bool(args.stream),
+                "dry_run": bool(args.dry_run),
+                "skip_image": bool(args.skip_image),
+            }
+            append_jsonl(output_jsonl, record)
+
             # Save to trajectory and checkpoint immediately
             trajectory[episode_id] = cur_trajectory
-            save_checkpoint(split, trajectory)
-            print(f"  [Checkpoint] Saved ({len(trajectory)}/{total} completed)")
+            completed_ids.add(episode_id)
+            if not args.disable_checkpoint:
+                save_checkpoint(split, trajectory)
+                print(f"  [Checkpoint] Saved ({len(trajectory)}/{total} completed)")
+
+            if _MEM_DEBUG and (i % max(1, args.mem_report_every) == 0):
+                extra_items = [
+                    f"results_len={len(trajectory)}",
+                    f"prompt_chars={prompt_preview_len}",
+                    f"pred_chars={response_len}",
+                    f"base64_chars={last_base64_len}",
+                    f"image_size={last_image_size}",
+                    f"image_bytes={last_image_bytes}",
+                ]
+                mem_report(f"after sample {i}", " ".join(extra_items))
+                maybe_print_torch_mem(f"after sample {i}")
+            mem_trace_report(i)
+            del record, result_str, cur_citynavData, cur_trajectory, pose_history, target_pred_px, landmark_bbox, target_pred_px_resized, landmark_bbox_resized
+            if _MEM_DEBUG and i % max(1, args.mem_report_every) == 0:
+                gc.collect()
 
         except APITimeoutError as e:
             total_time = time.time() - sample_start
@@ -277,7 +498,8 @@ def run_nav_gym(citynavData, split, step, action_num):
             print(f"vLLM 可能已经挂了，请检查后重新运行 python eval.py")
             print(f"已完成 {len(trajectory)}/{total} 个样本，进度已保存。")
             print(f"{'!'*60}\n")
-            save_checkpoint(split, trajectory)
+            if not args.disable_checkpoint:
+                save_checkpoint(split, trajectory)
             sys.exit(1)
 
         except Exception as e:
@@ -286,6 +508,15 @@ def run_nav_gym(citynavData, split, step, action_num):
             traceback.print_exc()
             print(f"{'='*60}\n")
             errors.append(i)
+            append_jsonl(output_jsonl, {
+                "id": episode_id,
+                "ok": False,
+                "split": split,
+                "sample_index": i,
+                "duration_s": total_time,
+                "error_type": type(e).__name__,
+                "error": str(e),
+            })
 
     if skipped > 0:
         print(f"\n  [Checkpoint] Skipped {skipped} already-completed samples")
@@ -296,6 +527,22 @@ def run_nav_gym(citynavData, split, step, action_num):
 
 
 def main():
+    global _MEM_TRACE_EVERY, _MEM_REPORT_EVERY, _MEM_SNAPSHOT_START
+    args = parse_args()
+    _MEM_TRACE_EVERY = max(1, args.mem_trace_every)
+    _MEM_REPORT_EVERY = max(1, args.mem_report_every)
+    if _MEM_DEBUG:
+        tracemalloc.start(25)
+        _MEM_SNAPSHOT_START = tracemalloc.take_snapshot()
+        mem_report("start")
+
+    if args.compress_images is not None:
+        API_CONFIG["compress_images"] = args.compress_images.lower() in {"1", "true", "yes", "y", "on"}
+
+    if args.print_env:
+        print_env_diagnostics()
+        return
+
     print("\n" + "🚀" * 30)
     print("FlightGPT Evaluation Starting")
     print("🚀" * 30)
@@ -313,13 +560,13 @@ def main():
     results = {}
     nums = {}
     total_errors = {}
-    step_num = 2    #total steps that agent take
-    action_num = 75     #actions per step
+    step_num = args.step_num
+    action_num = args.action_num
     
     overall_start = time.time()
     
     # 用 new 来表示新数据集，修改上面 绝对路径以及 gsmllavanav 的 default path 路径
-    for split in ["new"]:
+    for split in [args.split]:
     # for split in ["easy", "medium", "hard"]:
         print("\n" + "=" * 60)
         print(f"Processing split: {split.upper()}")
@@ -330,9 +577,13 @@ def main():
         else:
             data_path = f"{DATA_DIR}/citynav_val_unseen_{split}.json"
         
-        citynavData = CityNavData(data_path)
+        citynavData = CityNavData(data_path, deepcopy_arrays_on_getitem=args.deepcopy_arrays)
+        apply_sample_limit(citynavData, args.limit)
         total_samples = len(citynavData)
         print(f"Total samples in {split}: {total_samples}")
+        print(f"max_workers={args.max_workers} (current eval loop is sequential; use 1 for lowest memory pressure)")
+        print(f"stream={args.stream}, dry_run={args.dry_run}, skip_image={args.skip_image}, max_tokens={args.max_tokens}")
+        print(f"deepcopy_arrays_on_getitem={args.deepcopy_arrays}")
 
         # Only use the first N samples for quick testing.
         # test_sample_limit = 100
@@ -343,7 +594,7 @@ def main():
         #     print(f"Using first {len(citynavData)} samples for test run.")
 
         split_start = time.time()
-        traj, errors, image_dir = run_nav_gym(citynavData, split, step_num, action_num)
+        traj, errors, image_dir = run_nav_gym(citynavData, split, step_num, action_num, args)
         split_time = time.time() - split_start
         
         print(f"\n{'='*60}")
@@ -358,14 +609,19 @@ def main():
         print(f"  Errors (this run): {errors}")
         print(f"{'='*60}\n")
 
-        episodes = [ep for ep in citynavData.episodes if ep.id in traj]
-        if len(episodes) > 0:
-            metrics = eval_planning_metrics(episodes, traj)
-            print(f"{split} result:", metrics)
-            results[split] = metrics
-            nums[split] = len(episodes)
+        if len(traj) > 0:
+            episodes = [ep for ep in citynavData.episodes if ep.id in traj]
+            if len(episodes) > 0:
+                metrics = eval_planning_metrics(episodes, traj)
+                print(f"{split} result:", metrics)
+                results[split] = metrics
+                nums[split] = len(episodes)
+            else:
+                print(f"⚠ WARNING: No successful episodes for {split} split!")
+                results[split] = None
+                nums[split] = 0
         else:
-            print(f"⚠ WARNING: No successful episodes for {split} split!")
+            print(f"⚠ WARNING: Empty trajectory for {split} split!")
             results[split] = None
             nums[split] = 0
         
@@ -382,18 +638,16 @@ def main():
     print("🎯" * 30)
     
     if all(results.values()):
-        NE, SR, OSR, SPL = calculate_mean_metrics(results, nums)
-        print(f"\nMetrics:")
-        print(f"  NE (Navigation Error): {NE:.4f}")
-        print(f"  SR (Success Rate): {SR:.4f}")
-        print(f"  OSR (Oracle Success Rate): {OSR:.4f}")
-        print(f"  SPL (Success weighted by Path Length): {SPL:.4f}")
-        
-        # Save final results to JSON
-        final_results = {
-            "NE": NE, "SR": SR, "OSR": OSR, "SPL": SPL,
-            "per_split": {s: {"num": nums[s]} for s in nums},
-        }
+        final_results = {"per_split": {s: {"num": nums[s]} for s in nums}}
+        if {"easy", "medium", "hard"}.issubset(results.keys()):
+            NE, SR, OSR, SPL = calculate_mean_metrics(results, nums)
+            print(f"\nMetrics:")
+            print(f"  NE (Navigation Error): {NE:.4f}")
+            print(f"  SR (Success Rate): {SR:.4f}")
+            print(f"  OSR (Oracle Success Rate): {OSR:.4f}")
+            print(f"  SPL (Success weighted by Path Length): {SPL:.4f}")
+            final_results.update({"NE": NE, "SR": SR, "OSR": OSR, "SPL": SPL})
+
         result_path = os.path.join(SAVE_PATH, "final_results.json")
         with open(result_path, "w") as f:
             json.dump(final_results, f, indent=2)
@@ -409,6 +663,8 @@ def main():
         print(f"    {split}: {err_count} errors")
     
     print("\n" + "✓" * 60)
+    mem_report("end", extra=f"overall_minutes={overall_time/60:.2f}", force_gc=True)
+    maybe_print_torch_mem("end")
 
 if __name__ == "__main__":
     main()
