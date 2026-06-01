@@ -171,3 +171,5 @@ htmlcov/
 
 # mypy cache
 .mypy_cache/
+
+monitor.py
