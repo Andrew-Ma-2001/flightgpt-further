@@ -114,6 +114,28 @@ class GRPOScriptArguments(ScriptArguments):
             "help": "Choose reward method: 'default', 'mcp', ..."
         },
     )
+    # ----------------------- VIB-Nav (Visual Information Bottleneck) -----------------------
+    # Flat flags map onto the documented `vib:` config block; build_vib_config() turns
+    # them into a VIBConfig. Set vib_enabled=false (default) for the exact original pipeline.
+    vib_enabled: bool = field(default=False, metadata={"help": "Enable the visual information bottleneck."})
+    vib_mode: str = field(default="fixed", metadata={"help": "beta control mode: 'fixed' | 'dual'."})
+    vib_beta: float = field(default=1e-3, metadata={"help": "Rate coefficient beta for fixed mode."})
+    vib_R_star: Optional[float] = field(default=None, metadata={"help": "Target nats/token for dual mode."})
+    vib_lr_beta: float = field(default=0.01, metadata={"help": "Dual ascent step size for beta."})
+    vib_beta_max: float = field(default=10.0, metadata={"help": "Upper clamp for beta in dual mode."})
+    vib_free_bits: float = field(default=0.5, metadata={"help": "Per-token free bits."})
+    vib_instruction_conditioned: bool = field(default=True, metadata={"help": "Condition the bottleneck on the instruction."})
+    vib_eval_mode: str = field(default="mean", metadata={"help": "Eval mode: 'mean' | 'sample' | 'sample_avg_k'."})
+    vib_eval_samples: int = field(default=4, metadata={"help": "k for sample_avg_k eval."})
+    vib_n_cross_heads: int = field(default=8, metadata={"help": "Heads for instruction cross-attention."})
+    vib_hidden_dim: Optional[int] = field(default=None, metadata={"help": "MLP hidden dim (default d_model)."})
+    vib_cond_dim: Optional[int] = field(default=None, metadata={"help": "Conditioning dim (default d_model)."})
+    vib_logvar_min: float = field(default=-8.0, metadata={"help": "Lower clamp for logvar."})
+    vib_logvar_max: float = field(default=2.0, metadata={"help": "Upper clamp for logvar."})
+    vib_residual: bool = field(default=False, metadata={"help": "If True, output = H + z_delta; else z replaces H."})
+    vib_shared_noise_per_prompt: bool = field(default=False, metadata={"help": "Share eps across rollouts of a prompt group."})
+    vib_train_backbone: bool = field(default=False, metadata={"help": "Unfreeze backbone (default: only VIB trainable)."})
+    vib_artifact_every: int = field(default=0, metadata={"help": "Dump kl_per_token->patch artifacts every N steps (0=off)."})
 
 def euclidean_distance(cur_pose, target_location):
     cur_x, cur_y = cur_pose
@@ -451,6 +473,33 @@ class GRPOModelConfig(ModelConfig):
     freeze_vision_modules: bool = False
 
 
+from open_r1.models import VIBConfig
+
+
+def build_vib_config(script_args: "GRPOScriptArguments") -> VIBConfig:
+    """Turn the flat vib_* CLI flags into a VIBConfig dataclass."""
+    return VIBConfig(
+        enabled=script_args.vib_enabled,
+        mode=script_args.vib_mode,
+        beta=script_args.vib_beta,
+        R_star=script_args.vib_R_star,
+        lr_beta=script_args.vib_lr_beta,
+        beta_max=script_args.vib_beta_max,
+        free_bits=script_args.vib_free_bits,
+        instruction_conditioned=script_args.vib_instruction_conditioned,
+        eval_mode=script_args.vib_eval_mode,
+        eval_samples=script_args.vib_eval_samples,
+        n_cross_heads=script_args.vib_n_cross_heads,
+        hidden_dim=script_args.vib_hidden_dim,
+        cond_dim=script_args.vib_cond_dim,
+        logvar_min=script_args.vib_logvar_min,
+        logvar_max=script_args.vib_logvar_max,
+        residual=script_args.vib_residual,
+        shared_noise_per_prompt=script_args.vib_shared_noise_per_prompt,
+        train_backbone=script_args.vib_train_backbone,
+    )
+
+
 def get_vlm_module(model_name_or_path):
     if "qwen" in model_name_or_path.lower():
         return Qwen2VLModule
@@ -600,6 +649,10 @@ def main(script_args, training_args, model_args):
     trainer_cls = VLMGRPOTrainer
     print("using trainer:", trainer_cls.__name__)
 
+    vib_config = build_vib_config(script_args)
+    if vib_config.enabled:
+        print("VIB-Nav enabled:", vib_config)
+
     # Initialize the GRPO trainer
     trainer = trainer_cls(
         model=model_args.model_name_or_path,
@@ -613,6 +666,8 @@ def main(script_args, training_args, model_args):
         attn_implementation=model_args.attn_implementation,
         max_pixels=script_args.max_pixels,
         min_pixels=script_args.min_pixels,
+        vib_config=vib_config,
+        vib_artifact_every=script_args.vib_artifact_every,
     )
 
     # Train and push the model to the Hub

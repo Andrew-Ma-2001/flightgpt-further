@@ -72,6 +72,7 @@ if is_swanlab_available():
     import swanlab
 
 from open_r1.vlm_modules.vlm_module import VLMBaseModule
+from open_r1.models import VIBConfig, attach_vib, patch_qwen2_5_vl_with_vib, update_dual_beta
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
@@ -227,6 +228,8 @@ class VLMGRPOTrainer(Trainer):
         freeze_vision_modules: Optional[bool] = False,
         attn_implementation: str = "flash_attention_2",
         torch_dtype: str = "bfloat16",
+        vib_config: Optional[VIBConfig] = None,
+        vib_artifact_every: int = 0,
         **kwargs,
     ):
         # Args
@@ -313,6 +316,19 @@ class VLMGRPOTrainer(Trainer):
             # If PEFT is used, the reference model is not needed since the adapter can be disabled
             # to revert to the initial model.
             self.ref_model = None
+
+        # VIB-Nav: attach the bottleneck to the policy model only (not the frozen
+        # reference), after the ref model exists and before the optimizer is built
+        # so the VIB params are picked up by model.parameters().
+        self.vib_config = vib_config
+        self.vib_artifact_every = vib_artifact_every
+        self.vib_beta = vib_config.beta if (vib_config is not None and vib_config.enabled) else 0.0
+        self._vib_base_model = None
+        if vib_config is not None and vib_config.enabled:
+            patch_qwen2_5_vl_with_vib()
+            # Keep a direct handle to the inner Qwen module (identity is preserved
+            # through DeepSpeed/DDP wrapping) so we can read R_hat after the forward.
+            self._vib_base_model = attach_vib(model, vib_config)
 
         # Processing class
         if processing_class is None:
@@ -573,6 +589,18 @@ class VLMGRPOTrainer(Trainer):
         #     prompt_mask = prompt_mask[:, -self.max_prompt_length :]
         #     prompt_inputs["attention_mask"] = prompt_mask
 
+        # VIB-Nav: with shared_noise_per_prompt, seed eps from a stable per-prompt
+        # id so every rollout in a prompt group sees identical noise (lowers
+        # advantage variance, at the cost of not marginalizing over eps). Default
+        # off -> each rollout resamples its own z.
+        if (
+            self.vib_config is not None
+            and self.vib_config.enabled
+            and self.vib_config.shared_noise_per_prompt
+        ):
+            ident = inputs[0].get("image_path") or inputs[0].get("problem") or ""
+            self._vib_base_model.set_vib_group_seed(abs(hash(ident)) % (2**31))
+
         # Generate completions
         with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
             generate_returned_result = unwrapped_model.generate(
@@ -763,7 +791,26 @@ class VLMGRPOTrainer(Trainer):
             self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
 
         # Compute final loss
-        loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+        rl_loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+        loss = rl_loss
+
+        # VIB-Nav: add beta * R_hat. R_hat comes from the policy forward above and
+        # MUST stay attached to the autograd graph (we only detach inside the dual
+        # beta update). When VIB is disabled this block is skipped entirely.
+        if self.vib_config is not None and self.vib_config.enabled:
+            vib_rate = self._vib_base_model.pop_vib_rate()
+            vib_stats = self._vib_base_model.pop_vib_stats()
+            if vib_rate is not None:
+                if self.vib_config.mode == "dual":
+                    self.vib_beta = update_dual_beta(
+                        self.vib_beta,
+                        vib_rate,
+                        self.vib_config.R_star,
+                        self.vib_config.lr_beta,
+                        self.vib_config.beta_max,
+                    )
+                loss = rl_loss + self.vib_beta * vib_rate
+                self._log_vib(rl_loss, loss, vib_rate, vib_stats, inputs)
 
         # Log clip ratio
         is_clipped = (per_token_loss1 < per_token_loss2).float()
@@ -771,6 +818,44 @@ class VLMGRPOTrainer(Trainer):
         self._metrics["clip_ratio"].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
 
         return loss
+
+    def _log_vib(self, rl_loss, total_loss, vib_rate, vib_stats, inputs):
+        """Log VIB diagnostics and (optionally) dump per-token KL artifacts."""
+        self._metrics["vib/beta"].append(float(self.vib_beta))
+        self._metrics["vib/rate"].append(self.accelerator.gather_for_metrics(vib_rate.detach()).mean().item())
+        self._metrics["vib/rl_loss"].append(self.accelerator.gather_for_metrics(rl_loss.detach()).mean().item())
+        self._metrics["vib/total_loss"].append(self.accelerator.gather_for_metrics(total_loss.detach()).mean().item())
+        if vib_stats is not None:
+            for key in ("kl_token_mean", "suppressed_frac", "mu_abs_mean", "std_mean"):
+                if key in vib_stats:
+                    val = self.accelerator.gather_for_metrics(vib_stats[key]).mean().item()
+                    self._metrics[f"vib/{key}"].append(val)
+
+        every = getattr(self, "vib_artifact_every", 0)
+        if every and self.is_world_process_zero() and (self.state.global_step % every == 0):
+            self._dump_vib_artifact(vib_stats, inputs)
+
+    def _dump_vib_artifact(self, vib_stats, inputs):
+        """Persist kl_per_token (mapped to patch order) for a few samples so we can
+        visualize which visual tokens the bottleneck suppresses."""
+        if vib_stats is None or "kl_per_token" not in vib_stats:
+            return
+        try:
+            import json
+
+            out_dir = os.path.join(self.args.output_dir, "vib_artifacts")
+            os.makedirs(out_dir, exist_ok=True)
+            grid_thw = inputs.get("multimodal_inputs", {}).get("image_grid_thw")
+            payload = {
+                "global_step": int(self.state.global_step),
+                "image_grid_thw": grid_thw.tolist() if grid_thw is not None else None,
+                "kl_per_token": [k.float().cpu().tolist() for k in vib_stats["kl_per_token"]],
+            }
+            path = os.path.join(out_dir, f"vib_kl_step{self.state.global_step}.json")
+            with open(path, "w") as f:
+                json.dump(payload, f)
+        except Exception as e:
+            warnings.warn(f"Failed to dump VIB artifact: {e}")
 
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         metrics = {key: sum(val) / len(val) for key, val in self._metrics.items()}  # average the metrics

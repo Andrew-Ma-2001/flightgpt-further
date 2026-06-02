@@ -117,6 +117,73 @@ sh ./open-r1-multimodal/run_scripts/run_grpo_lora_newdataset_flightgptsft.sh
 
 ---
 
+## 🧠 VIB-Nav: Learned Visual Information Bottleneck
+
+Empirically, training at 4k map resolution but doing inference at 2k beats 4k/4k.
+The hypothesis is that navigation's task-sufficient statistic is low-dimensional, so
+4k feeds information *above* the task-optimal rate and the policy overfits to nuisance
+detail. **VIB-Nav** replaces the crude "downsample to 2k" bottleneck with a *learned,
+instruction-conditioned* Information Bottleneck on the post-merger visual tokens,
+decoupling the **information rate** from the **input resolution**.
+
+For each visual token `h_i` (conditioned on the instruction via cross-attention) we learn a
+diagonal Gaussian posterior `q(z_i | h_i, c_i) = N(mu_i, diag(exp(logvar_i)))`, sample
+`z_i` with the reparameterization trick, and feed **z** (not h) to the LLM during both
+training and rollouts. We add a KL rate term to the GRPO loss:
+
+```
+L = L_RL + beta * R_hat,   R_hat = mean_i max(KL(q(z_i) || N(0,I)), free_bits)   # nats/token
+```
+
+Code: bottleneck in `open-r1-multimodal/src/open_r1/models/vib_adapter.py`, the Qwen2.5-VL
+forward hook + `pop_vib_rate()` in `open-r1-multimodal/src/open_r1/models/qwen_vib_patch.py`,
+loss/logging in `open-r1-multimodal/src/open_r1/trainer/grpo_trainer.py`. Unit tests:
+`open-r1-multimodal/tests/test_vib_adapter.py` (`pytest tests/test_vib_adapter.py`).
+
+### Enable VIB
+
+Add these flags to any GRPO run script (defaults reproduce the original pipeline exactly,
+i.e. `--vib_enabled false` changes no numerics):
+
+```bash
+    --vib_enabled true \
+    --vib_mode fixed \
+    --vib_beta 1e-3 \
+    --vib_free_bits 0.5 \
+    --vib_instruction_conditioned true \
+    --vib_eval_mode mean \
+    --freeze_vision_modules true       # backbone stays frozen; only VIB (+ LoRA) train
+```
+
+A ready-made example is `open-r1-multimodal/run_scripts/run_grpo_vib.sh`.
+
+### Logged diagnostics (every `logging_steps`)
+
+`vib/beta`, `vib/rate` (R_hat), `vib/kl_token_mean`, `vib/suppressed_frac`,
+`vib/mu_abs_mean`, `vib/std_mean`, `vib/rl_loss`, `vib/total_loss`. Set
+`--vib_artifact_every M` (M>0) to dump per-token KL → image-patch artifacts to
+`<output_dir>/vib_artifacts/` for the "which tokens get suppressed" figure.
+
+### Experiments (one-line config changes)
+
+| Goal | Change |
+| --- | --- |
+| Regression test (identical to original) | `--vib_enabled false` |
+| Instruction-agnostic ablation | `--vib_instruction_conditioned false` |
+| **Rate–performance inverted-U** (beta sweep) | `--vib_mode fixed` with `--vib_beta` in `{0, 1e-4, 1e-3, 1e-2, 1e-1}` |
+| **Matched-rate 4k vs 2k** | `--vib_mode dual --vib_R_star <R>` trained once on 4k data and once on 2k data |
+| Free-bits ablation | `--vib_free_bits` in `{0.0, 0.5, 1.0}` |
+
+**Beta sweep** (draws the inverted-U): launch one run per beta with `--vib_mode fixed`,
+plotting reported eval metric vs the converged `vib/rate`.
+
+**Matched-rate experiment**: pick a target rate `R*`, run `--vib_mode dual --vib_R_star R*`
+on the 4k dataset and again on the 2k dataset. Dual ascent drives `vib/rate -> R*` in both,
+so the two runs are compared at *matched information rate* despite different input
+resolutions — isolating the effect of rate from resolution.
+
+---
+
 ## 🖋️ Citation
 
 If you use FlightGPT in your research, please cite our project:
