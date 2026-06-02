@@ -200,16 +200,30 @@ def accuracy_reward(completions, solution, **kwargs):
 
 def gaussian_accuracy_reward(completions, solution, **kwargs):
     """
-    GUI-G² style Gaussian reward for CityNav.
- 
-    R_total = v * R_point + gamma * R_coverage + R_format
+    GUI-G² (GUI-G2: Gaussian Reward Modeling for GUI Grounding) adapted reward for CityNav.
+
+    How this function is introduced from GUI-G2:
+    1) We keep the paper's point-wise Gaussian shaping idea:
+       R_point = exp(-0.5 * (dx^2/sigma_x^2 + dy^2/sigma_y^2)).
+    2) We keep the paper's adaptive variance design:
+       sigma_x, sigma_y are scaled from landmark box size (alpha * width/height),
+       so larger landmarks tolerate larger localization deviations.
+    3) We keep the paper's coverage term formulation as an optional geometric alignment
+       score (`_bhattacharyya_reward`), corresponding to Gaussian region matching.
+
+    CityNav-specific adaptation decisions:
+    - GT point is `target_position` (single target center from dataset labels).
+    - Multiple GT landmark candidates are allowed; we take max reward over candidates.
+    - Current training uses `gamma = 0.0`, so total reward emphasizes point localization:
+      R_total = nu * R_point + gamma * R_coverage.
+      (Coverage is implemented for ablation/extension, but disabled by default.)
     """
     contents = [completion[0]["content"] for completion in completions]
     rewards = []
     # Hyperparameters
     alpha = 0.5    # adaptive variance scaling factor (paper default)
     nu = 1.0       # weight for point reward
-    gamma = 0.0    # weight for coverage reward
+    gamma = 1.0    # weight for coverage reward
     for content, sol in zip(contents, solution):
         try:
             sol = ast.literal_eval(sol)
