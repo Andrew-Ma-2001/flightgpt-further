@@ -104,7 +104,34 @@ class GPTAgent:
         )
         response = result.choices[0].message.content
         return response
-    
+
+    def act_on_image(self, image_path, prompt, system_prompt=None):
+        """Low-level single-image VLM call without map resize/scale coupling.
+
+        Unlike ``act()``, this performs NO image resizing and NO coordinate
+        scaling: it sends ``image_path`` together with ``prompt`` to the VLM and
+        returns the raw response string. Any coordinates in the response are
+        therefore expressed in the pixel frame of ``image_path`` exactly as sent.
+
+        This is used by the HLM Focus phase to query a high-resolution crop, for
+        which rescaling is handled externally by the coordinate mapper.
+
+        Args:
+            image_path: path to the image to send (e.g. a saved crop).
+            prompt: the user prompt text.
+            system_prompt: optional override; defaults to ``self.system_prompt``.
+
+        Returns:
+            The model response content (str).
+        """
+        result = self._gpt4o_imagefile(
+            map_file=image_path,
+            view_file=image_path,
+            system_prompt=system_prompt or self.system_prompt,
+            prompt=prompt,
+        )
+        return result.choices[0].message.content
+
     def scale_coordinates_to_original(self, coordinates):
         """
         Scale coordinates from resized image back to original image dimensions

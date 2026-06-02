@@ -15,6 +15,9 @@ from navgym.models.CityNavData import CityNavData
 from navgym.models.NavGym import NavGym
 from navgym.agents.CityNavAgent import GPTAgent
 from navgym.tools.EvalTools import eval_planning_metrics
+from navgym.hlm import HierarchicalLocalizationModule, HLMConfig
+from navgym.hlm.visualization import visualize_hlm
+from navgym.hlm.diagnostics import HLMDiagnostics
 from gsamllavanav.observation import cropclient
 from gsamllavanav.mapdata import GROUND_LEVEL
 from gsamllavanav.space import Pose4D, view_area_corners
@@ -36,9 +39,26 @@ API_CONFIG = {
     "system_prompt": "You are an intelligent autonomous aerial vehicle (UAV) equipped for real-world navigation and visual target localization.",
     # Whether to compress/resize images before VLLM inference.
     # Keep True to reduce throughput pressure; set False to disable compression.
-    "compress_images": True,
+    "compress_images": False,
 }
 SAVE_PATH = "./experiment"
+
+# ============ HLM (Hierarchical Localization Module) config ============
+# When True, predictions go through the coarse-to-fine HLM pipeline instead of a
+# single VLM call. HLM returns coordinates already in the ORIGINAL (4K) image
+# frame, so `scale_coordinates_to_original` must NOT be applied to its output.
+USE_HLM = True
+SAVE_HLM_VIZ = False  # set True to dump per-sample HLM debug images (slow / large)
+HLM_CONFIG = HLMConfig(
+    coarse_max_size=2048,
+    adaptive_crop=False,
+    fixed_crop_size=1024,
+    crop_alpha=3.0,
+    crop_min=512,
+    crop_max=2048,
+    model_input_size=None,  # None = send the native crop; set e.g. 1024 to resize
+    enable_fine=True,
+)
 
 NEW_DATA_DIR = "/home/yjy/flightgpt/FlightGPT/refine_citynav/processed_citynav"
 
@@ -174,6 +194,8 @@ def run_nav_gym(citynavData, split, step, action_num):
     total = len(citynavData)
     skipped = 0
 
+    diagnostics = HLMDiagnostics()  # Glance-only vs HLM A/B (only filled when USE_HLM)
+
     for i in tqdm(range(total), desc=f"Running {split}"):
         episode_id = citynavData.episodes[i].id
 
@@ -216,35 +238,62 @@ def run_nav_gym(citynavData, split, step, action_num):
                 
                 agent = initialize_agent(navGym)
                 
-                print(f"[Sample {i}] Calling agent.act()...")
-                act_start = time.time()
-                
-                result_str = agent.act(
-                    cur_whole_map=navGym.cur_whole_map,
-                    cur_rgb_drone=navGym.cur_rgb_drone,
-                    cur_position=navGym._get_px(start_pose)
-                )
-                
-                act_time = time.time() - act_start
-                print(f"[Sample {i}] agent.act() completed in {act_time:.2f}s")
-                print(f"[Sample {i}] Response length: {len(result_str)} chars")
-
-                landmark_bbox_resized = parse_bbox(result_str, "landmark_bbox")
-                target_pred_px_resized = parse_location(result_str)
-                
-                landmark_bbox = agent.scale_coordinates_to_original(landmark_bbox_resized)
-                target_pred_px = agent.scale_coordinates_to_original(target_pred_px_resized)
-                
-                print(f"[Sample {i}] Predicted target (resized): {target_pred_px_resized}")
-                print(f"[Sample {i}] Predicted target (original): {target_pred_px}")
-                if landmark_bbox_resized != landmark_bbox:
-                    print(f"[Sample {i}] Landmark bbox scaled: {landmark_bbox_resized} -> {landmark_bbox}")
-                
+                start_px = navGym._get_px(start_pose)
                 true_start_px = navGym.px_trajectory[0]
                 true_target_px = navGym.target_px
 
-                save_path = f"{SAVE_PATH}/visualized_image/{os.path.basename(navGym.cur_whole_map)}"
-                # visualize_prediction(navGym, navGym.cur_whole_map, landmark_bbox, target_pred_px, true_target_px, save_path)
+                hlm_result = None
+                if USE_HLM:
+                    print(f"[Sample {i}] Calling HLM (coarse-to-fine)...")
+                    act_start = time.time()
+                    hlm = HierarchicalLocalizationModule(agent, HLM_CONFIG)
+                    hlm_result = hlm.forward(
+                        image_4k_path=navGym.cur_whole_map,
+                        instruction=navGym.target_description,
+                        start_px=start_px,
+                    )
+                    act_time = time.time() - act_start
+                    # HLM outputs are already in ORIGINAL (4K) image space.
+                    # Do NOT apply scale_coordinates_to_original here.
+                    target_pred_px = list(hlm_result.final_xy)
+                    landmark_bbox = list(hlm_result.landmark_bbox_4k) if hlm_result.landmark_bbox_4k else [0, 0, 0, 0]
+                    print(f"[Sample {i}] HLM completed in {act_time:.2f}s (used_fine={hlm_result.used_fine})")
+                    print(f"[Sample {i}] HLM coarse(4k)={hlm_result.coarse_xy_4k} final(4k)={target_pred_px}")
+                    try:
+                        diagnostics.record_from_navgym(navGym, hlm_result, true_start_px, true_target_px)
+                    except Exception as diag_err:
+                        print(f"[Sample {i}] [warn] HLM diagnostics skipped: {diag_err}")
+                else:
+                    print(f"[Sample {i}] Calling agent.act()...")
+                    act_start = time.time()
+
+                    result_str = agent.act(
+                        cur_whole_map=navGym.cur_whole_map,
+                        cur_rgb_drone=navGym.cur_rgb_drone,
+                        cur_position=start_px
+                    )
+
+                    act_time = time.time() - act_start
+                    print(f"[Sample {i}] agent.act() completed in {act_time:.2f}s")
+                    print(f"[Sample {i}] Response length: {len(result_str)} chars")
+
+                    landmark_bbox_resized = parse_bbox(result_str, "landmark_bbox")
+                    target_pred_px_resized = parse_location(result_str)
+
+                    landmark_bbox = agent.scale_coordinates_to_original(landmark_bbox_resized)
+                    target_pred_px = agent.scale_coordinates_to_original(target_pred_px_resized)
+
+                    print(f"[Sample {i}] Predicted target (resized): {target_pred_px_resized}")
+                    print(f"[Sample {i}] Predicted target (original): {target_pred_px}")
+                    if landmark_bbox_resized != landmark_bbox:
+                        print(f"[Sample {i}] Landmark bbox scaled: {landmark_bbox_resized} -> {landmark_bbox}")
+
+                if SAVE_HLM_VIZ and hlm_result is not None:
+                    ne_px = float(np.hypot(target_pred_px[0] - true_target_px[0],
+                                           target_pred_px[1] - true_target_px[1]))
+                    viz_path = f"{SAVE_PATH}/hlm_viz/{os.path.basename(navGym.cur_whole_map)}"
+                    visualize_hlm(navGym.cur_whole_map, hlm_result,
+                                  gt_xy_4k=true_target_px, ne_px=ne_px, save_path=viz_path)
 
                 pred_pose = compute_pose(navGym, target_pred_px, true_start_px, map_name)
                 
@@ -290,6 +339,12 @@ def run_nav_gym(citynavData, split, step, action_num):
     if skipped > 0:
         print(f"\n  [Checkpoint] Skipped {skipped} already-completed samples")
 
+    if USE_HLM and diagnostics.total > 0:
+        diagnostics.print_summary(label=split)
+        ab_path = os.path.join(SAVE_PATH, f"hlm_ab_{split}.json")
+        diagnostics.save(ab_path, label=split)
+        print(f"  [HLM A/B] saved to {ab_path}")
+
     return trajectory, errors, SAVE_PATH 
 
 
@@ -313,14 +368,15 @@ def main():
     results = {}
     nums = {}
     total_errors = {}
-    step_num = 2    #total steps that agent take
+    step_num = 1    #total steps that agent take
     action_num = 75     #actions per step
     
     overall_start = time.time()
     
     # 用 new 来表示新数据集，修改上面 绝对路径以及 gsmllavanav 的 default path 路径
-    for split in ["new"]:
+    # for split in ["new"]:
     # for split in ["easy", "medium", "hard"]:
+    for split in ["hard"]:
         print("\n" + "=" * 60)
         print(f"Processing split: {split.upper()}")
         print("=" * 60)

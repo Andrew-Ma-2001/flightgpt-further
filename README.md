@@ -112,6 +112,7 @@ llamafactory-cli export ./LLaMA-Factory/examples/merge_lora/qwen2vl_lora_sft.yam
 ```bash
 sh ./open-r1-multimodal/run_scripts/run_grpo_rec_lora.sh
 sh ./open-r1-multimodal/run_scripts/run_grpo_rec_lora_newdataset.sh
+sh ./open-r1-multimodal/run_scripts/run_grpo_lora_newdataset_flightgptsft.sh
 ```
 
 ---
